@@ -7,6 +7,7 @@ import { createRejectFilter } from '@/utils/node';
 import { WebSpeechClient } from './WebSpeechClient';
 import { NativeTTSClient } from './NativeTTSClient';
 import { EdgeTTSClient } from './EdgeTTSClient';
+import { AudiobookTTSClient } from './AudiobookTTSClient';
 import { TTSUtils } from './TTSUtils';
 import { TTSClient } from './TTSClient';
 import { isValidLang } from '@/utils/lang';
@@ -42,10 +43,19 @@ export class TTSController extends EventTarget {
   ttsWebClient: TTSClient;
   ttsEdgeClient: TTSClient;
   ttsNativeClient: TTSClient | null = null;
+  ttsAudiobookClient: AudiobookTTSClient | null = null;
   ttsWebVoices: TTSVoice[] = [];
   ttsEdgeVoices: TTSVoice[] = [];
   ttsNativeVoices: TTSVoice[] = [];
   ttsTargetLang: string = '';
+
+  /** Current EPUB section label (chapter title). Set by useTTSControl from
+   *  reading progress so AudiobookTTSClient can match chapters by title. */
+  sectionLabel: string = '';
+
+  /** Current EPUB section index (0-based). Used by AudiobookTTSClient as a
+   *  position-based fallback when title matching fails. */
+  sectionIndex: number = -1;
 
   options: TTSHighlightOptions = { style: 'highlight', color: 'gray' };
 
@@ -55,6 +65,7 @@ export class TTSController extends EventTarget {
     isAuthenticated: boolean = false,
     preprocessCallback?: (ssml: string) => Promise<string>,
     onSectionChange?: (sectionIndex: number) => Promise<void>,
+    audiobookManifestUrl?: string,
   ) {
     super();
     this.ttsWebClient = new WebSpeechClient(this);
@@ -62,6 +73,9 @@ export class TTSController extends EventTarget {
     // TODO: implement native TTS client for iOS and PC
     if (appService?.isAndroidApp) {
       this.ttsNativeClient = new NativeTTSClient(this);
+    }
+    if (audiobookManifestUrl) {
+      this.ttsAudiobookClient = new AudiobookTTSClient(this, audiobookManifestUrl);
     }
     this.ttsClient = this.ttsWebClient;
     this.appService = appService;
@@ -73,7 +87,15 @@ export class TTSController extends EventTarget {
 
   async init() {
     const availableClients = [];
-    if (await this.ttsEdgeClient.init()) {
+
+    // Audiobook client takes priority when available — it uses the real
+    // pre-recorded audio instead of synthesising speech on the fly.
+    const audiobookReady = this.ttsAudiobookClient && (await this.ttsAudiobookClient.init());
+    if (audiobookReady) {
+      availableClients.push(this.ttsAudiobookClient!);
+    }
+    // Skip EdgeTTS init when audiobook is active — avoids spurious "need auth" toast.
+    if (!audiobookReady && (await this.ttsEdgeClient.init())) {
       availableClients.push(this.ttsEdgeClient);
     }
     if (this.ttsNativeClient && (await this.ttsNativeClient.init())) {
@@ -84,13 +106,16 @@ export class TTSController extends EventTarget {
       availableClients.push(this.ttsWebClient);
     }
     this.ttsClient = availableClients[0] || this.ttsWebClient;
-    const preferredClientName = TTSUtils.getPreferredClient();
-    if (preferredClientName) {
-      const preferredClient = availableClients.find(
-        (client) => client.name === preferredClientName,
-      );
-      if (preferredClient) {
-        this.ttsClient = preferredClient;
+    // Audiobook client always takes priority when available — skip stored preference.
+    if (!this.ttsAudiobookClient?.initialized) {
+      const preferredClientName = TTSUtils.getPreferredClient();
+      if (preferredClientName) {
+        const preferredClient = availableClients.find(
+          (client) => client.name === preferredClientName,
+        );
+        if (preferredClient) {
+          this.ttsClient = preferredClient;
+        }
       }
     }
     this.ttsWebVoices = await this.ttsWebClient.getAllVoices();
@@ -324,17 +349,24 @@ export class TTSController extends EventTarget {
 
         ssml = await this.#preprocessSSML(await ssml);
         if (!ssml) {
-          this.#nossmlCnt++;
-          // FIXME: in case we are at the end of the book, need a better way to handle this
-          if (this.#nossmlCnt < 10 && this.state === 'playing' && !oneTime) {
+          if (this.state === 'playing' && !oneTime) {
             resolve();
             if (await this.#initTTSForNextSection()) {
               await this.forward();
             } else {
               await this.stop();
             }
+            return;
           }
-          console.log('[TTS] no SSML, skipping for', this.#nossmlCnt);
+          // For non-audiobook clients, guard against infinite empty-section loops
+          if (!this.ttsAudiobookClient?.initialized) {
+            this.#nossmlCnt++;
+            if (this.#nossmlCnt >= 10) {
+              console.warn('[TTS] Too many empty sections, stopping');
+              await this.stop();
+            }
+          }
+          console.log('[TTS] no SSML, skipping');
           return;
         } else {
           this.#nossmlCnt = 0;
@@ -552,6 +584,53 @@ export class TTSController extends EventTarget {
     }
   }
 
+  dispatchError(message: string) {
+    this.dispatchEvent(new CustomEvent('tts-error', { detail: { message } }));
+  }
+
+  async skipBack(seconds = 15): Promise<void> {
+    if (this.ttsAudiobookClient?.initialized) {
+      await this.ttsAudiobookClient.skipBack(seconds);
+    }
+  }
+
+  async skipForward(seconds = 30): Promise<void> {
+    if (this.ttsAudiobookClient?.initialized) {
+      await this.ttsAudiobookClient.skipForward(seconds);
+    }
+  }
+
+  async seekTo(seconds: number): Promise<void> {
+    if (this.ttsAudiobookClient?.initialized) {
+      await this.ttsAudiobookClient.seekTo(seconds);
+    }
+  }
+
+  getAudiobookChapters(): { index: number; title: string; duration_seconds: number }[] {
+    return this.ttsAudiobookClient?.getChapters() ?? [];
+  }
+
+  get audiobookNarrator(): string {
+    return this.ttsAudiobookClient?.narratorName ?? '';
+  }
+
+  /**
+   * Jump to a manifest chapter by index (1-based).
+   * Updates the controller's sectionLabel/sectionIndex, navigates the reader,
+   * then restarts playback from the beginning of that chapter.
+   */
+  async navigateToChapter(chapterIndex: number): Promise<void> {
+    if (!this.ttsAudiobookClient?.initialized) return;
+    this.ttsAudiobookClient.setCurrentChapterByIndex(chapterIndex);
+    // Use chapterIndex - 1 as the EPUB section index (best-effort approximation)
+    const sectionIndex = chapterIndex - 1;
+    await this.stop();
+    const ok = await this.#initTTSForSection(sectionIndex);
+    if (ok) {
+      this.#speak(this.view.tts?.start());
+    }
+  }
+
   error(e: unknown) {
     console.error(e);
     this.state = 'stopped';
@@ -570,6 +649,9 @@ export class TTSController extends EventTarget {
     }
     if (this.ttsNativeClient?.initialized) {
       await this.ttsNativeClient.shutdown();
+    }
+    if (this.ttsAudiobookClient?.initialized) {
+      await this.ttsAudiobookClient.shutdown();
     }
   }
 }

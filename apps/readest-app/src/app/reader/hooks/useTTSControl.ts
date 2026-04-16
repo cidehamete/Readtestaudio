@@ -19,6 +19,7 @@ import { buildTTSMediaMetadata } from '@/utils/ttsMetadata';
 import { invokeUseBackgroundAudio } from '@/utils/bridge';
 import { estimateTTSTime } from '@/utils/ttsTime';
 import { useTTSMediaSession } from './useTTSMediaSession';
+import { getAudiobookManifestUrl } from '@/hooks/useAudiobookLink';
 
 interface UseTTSControlProps {
   bookKey: string;
@@ -45,6 +46,11 @@ export const useTTSControl = ({ bookKey, onRequestHidePanel }: UseTTSControlProp
   const [timeoutOption, setTimeoutOption] = useState(0);
   const [timeoutTimestamp, setTimeoutTimestamp] = useState(0);
   const [timeoutFunc, setTimeoutFunc] = useState<ReturnType<typeof setTimeout> | null>(null);
+
+  const [audiobookCurrentTime, setAudiobookCurrentTime] = useState(0);
+  const [audiobookDuration, setAudiobookDuration] = useState(0);
+  const [audiobookChapterTitle, setAudiobookChapterTitle] = useState('');
+  const [audiobookNarrator, setAudiobookNarrator] = useState('');
 
   const followingTTSLocationRef = useRef(true);
   const sectionChangingTimestampRef = useRef(0);
@@ -128,6 +134,8 @@ export const useTTSControl = ({ bookKey, onRequestHidePanel }: UseTTSControlProp
     const { title, author, coverImageUrl } = bookData.book;
 
     const handleNeedAuth = () => {
+      // Don't show auth toast when the audiobook client is active
+      if (ttsController?.ttsAudiobookClient?.initialized) return;
       eventDispatcher.dispatch('toast', {
         message: _('Please log in to use advanced TTS features'),
         type: 'error',
@@ -135,10 +143,35 @@ export const useTTSControl = ({ bookKey, onRequestHidePanel }: UseTTSControlProp
       });
     };
 
+    const handleTTSError = (e: Event) => {
+      const { message } = (e as CustomEvent<{ message: string }>).detail;
+      eventDispatcher.dispatch('toast', { message, type: 'error', timeout: 6000 });
+    };
+
+    const handleAudiobookTime = (e: Event) => {
+      const { currentTime, duration, chapterTitle, narratorName } = (
+        e as CustomEvent<{
+          currentTime: number;
+          duration: number;
+          chapterTitle: string;
+          narratorName: string;
+        }>
+      ).detail;
+      setAudiobookCurrentTime(currentTime);
+      setAudiobookDuration(duration);
+      setAudiobookChapterTitle(chapterTitle);
+      setAudiobookNarrator(narratorName);
+    };
+
     const handleSpeakMark = (e: Event) => {
       const progress = getProgress(bookKey);
       const viewSettings = getViewSettings(bookKey);
-      const { sectionLabel } = progress || {};
+      const { sectionLabel, index: sectionIndex } = progress || {};
+      // Keep AudiobookTTSClient informed of the current chapter title and index
+      if (ttsController) {
+        ttsController.sectionLabel = sectionLabel || '';
+        ttsController.sectionIndex = sectionIndex ?? -1;
+      }
       const mark = (e as CustomEvent<TTSMark>).detail;
       const ttsMediaMetadata = viewSettings?.ttsMediaMetadata ?? 'sentence';
 
@@ -234,10 +267,14 @@ export const useTTSControl = ({ bookKey, onRequestHidePanel }: UseTTSControlProp
     ttsController.addEventListener('tts-need-auth', handleNeedAuth);
     ttsController.addEventListener('tts-speak-mark', handleSpeakMark);
     ttsController.addEventListener('tts-highlight-mark', handleHighlightMark);
+    ttsController.addEventListener('tts-error', handleTTSError);
+    ttsController.addEventListener('tts-audiobook-time', handleAudiobookTime);
     return () => {
       ttsController.removeEventListener('tts-need-auth', handleNeedAuth);
       ttsController.removeEventListener('tts-speak-mark', handleSpeakMark);
       ttsController.removeEventListener('tts-highlight-mark', handleHighlightMark);
+      ttsController.removeEventListener('tts-error', handleTTSError);
+      ttsController.removeEventListener('tts-audiobook-time', handleAudiobookTime);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ttsController, bookKey]);
@@ -487,15 +524,21 @@ export const useTTSControl = ({ bookKey, onRequestHidePanel }: UseTTSControlProp
         setTtsClientsInitialized(false);
 
         setShowIndicator(true);
+        const audiobookManifestUrl = getAudiobookManifestUrl(bookData.book.hash) ?? undefined;
         const ttsController = new TTSController(
           appService,
           view,
           !!user?.id,
           preprocessSSMLForTTS,
           handleSectionChange,
+          audiobookManifestUrl,
         );
         ttsControllerRef.current = ttsController;
         setTtsController(ttsController);
+
+        // Seed the section label and index so AudiobookTTSClient can match the first chapter
+        ttsController.sectionLabel = progress?.sectionLabel || '';
+        ttsController.sectionIndex = progress?.index ?? -1;
 
         await ttsController.init();
         await ttsController.initViewTTS(ttsFromIndex);
@@ -581,6 +624,40 @@ export const useTTSControl = ({ bookKey, onRequestHidePanel }: UseTTSControlProp
     const ttsController = ttsControllerRef.current;
     if (ttsController) {
       await ttsController.forward(byMark);
+    }
+  }, []);
+
+  const handleSkipBack = useCallback(async (seconds = 15) => {
+    const ttsController = ttsControllerRef.current;
+    if (ttsController) {
+      await ttsController.skipBack(seconds);
+    }
+  }, []);
+
+  const handleSkipForward = useCallback(async (seconds = 30) => {
+    const ttsController = ttsControllerRef.current;
+    if (ttsController) {
+      await ttsController.skipForward(seconds);
+    }
+  }, []);
+
+  const handleSeekTo = useCallback(async (seconds: number) => {
+    const ttsController = ttsControllerRef.current;
+    if (ttsController) {
+      await ttsController.seekTo(seconds);
+    }
+  }, []);
+
+  const handleGetChapters = useCallback(() => {
+    return ttsControllerRef.current?.getAudiobookChapters() ?? [];
+  }, []);
+
+  const handleJumpToChapter = useCallback(async (chapterIndex: number) => {
+    const ttsController = ttsControllerRef.current;
+    if (ttsController) {
+      setIsPlaying(true);
+      setIsPaused(false);
+      await ttsController.navigateToChapter(chapterIndex);
     }
   }, []);
 
@@ -696,11 +773,21 @@ export const useTTSControl = ({ bookKey, onRequestHidePanel }: UseTTSControlProp
       });
 
       mediaSession.setActionHandler('seekforward', () => {
-        handleForward(true);
+        const isAudiobook = !!ttsControllerRef.current?.ttsAudiobookClient?.initialized;
+        if (isAudiobook) {
+          handleSkipForward(30);
+        } else {
+          handleForward(true);
+        }
       });
 
       mediaSession.setActionHandler('seekbackward', () => {
-        handleBackward(true);
+        const isAudiobook = !!ttsControllerRef.current?.ttsAudiobookClient?.initialized;
+        if (isAudiobook) {
+          handleSkipBack(15);
+        } else {
+          handleBackward(true);
+        }
       });
 
       mediaSession.setActionHandler('nexttrack', () => {
@@ -719,6 +806,7 @@ export const useTTSControl = ({ bookKey, onRequestHidePanel }: UseTTSControlProp
     ttsLang,
     ttsClientsInited,
     isTTSActive: ttsController !== null,
+    isAudiobookActive: ttsController?.ttsAudiobookClient?.initialized === true,
     showIndicator,
     showTTSBar,
     showBackToCurrentTTSLocation,
@@ -730,7 +818,16 @@ export const useTTSControl = ({ bookKey, onRequestHidePanel }: UseTTSControlProp
     handleTogglePlay,
     handleBackward,
     handleForward,
+    handleSkipBack,
+    handleSkipForward,
+    handleSeekTo,
+    handleGetChapters,
+    handleJumpToChapter,
     handlePause,
+    audiobookCurrentTime,
+    audiobookDuration,
+    audiobookChapterTitle,
+    audiobookNarrator,
     handleSetRate,
     handleSetVoice,
     handleGetVoices,

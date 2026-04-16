@@ -29,7 +29,7 @@ interface UseTTSControlProps {
 export const useTTSControl = ({ bookKey, onRequestHidePanel }: UseTTSControlProps) => {
   const _ = useTranslation();
   const { appService } = useEnv();
-  const { user } = useAuth();
+  useAuth();
   const { isDarkMode } = useThemeStore();
   const { getBookData } = useBookDataStore();
   const { getView, getProgress, getViewSettings } = useReaderStore();

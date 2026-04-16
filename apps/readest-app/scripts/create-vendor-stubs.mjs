@@ -15,7 +15,7 @@ const stubs = [
     path: 'public/vendor/simplecc/simplecc_wasm.js',
     content:
       '// stub for SSR build — real WASM loaded at runtime\n' +
-      'export default async function init(_input) {}\n' +
+      'export default async function init(_input) { return {}; }\n' +
       'export function simplecc(text, _variant) { return text; }\n',
   },
 ];

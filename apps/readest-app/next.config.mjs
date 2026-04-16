@@ -38,6 +38,8 @@ const nextConfig = {
   turbopack: {
     resolveAlias: {
       nunjucks: 'nunjucks/browser/nunjucks.js',
+      '@pdfjs/pdf.min.mjs': './public/vendor/pdfjs/pdf.min.mjs',
+      '@simplecc/simplecc_wasm': './public/vendor/simplecc/simplecc_wasm',
       ...(appPlatform !== 'web' ? { '@tursodatabase/database-wasm': './src/utils/stub.ts' } : {}),
     },
   },

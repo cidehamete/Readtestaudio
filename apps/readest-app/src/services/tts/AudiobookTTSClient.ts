@@ -447,16 +447,18 @@ export class AudiobookTTSClient implements TTSClient {
       return;
     }
 
-    // Iterate through sentence marks, highlighting each as audio reaches it
+    // Iterate through sentence marks, highlighting each as audio reaches it.
+    // After each mark we yield 'end' immediately so the controller calls
+    // forward() for the next page — the audio keeps streaming uninterrupted.
     for (let i = 0; i < marks.length; i++) {
       if (signal.aborted) break;
 
       const mark = marks[i]!;
       const sentenceStart = sentenceStartTimes[i] ?? 0;
-      const nextSentenceStart = sentenceStartTimes[i + 1] ?? chapter.duration_seconds;
 
-      // Seek if audio has drifted beyond threshold
-      if (Math.abs(this.#audioEl.currentTime - sentenceStart) > SEEK_DRIFT_THRESHOLD_SEC) {
+      // Only seek forward if audio has fallen behind (don't seek backwards
+      // into already-played content).
+      if (this.#audioEl.currentTime < sentenceStart - SEEK_DRIFT_THRESHOLD_SEC) {
         this.#audioEl.currentTime = sentenceStart;
       }
 
@@ -468,9 +470,6 @@ export class AudiobookTTSClient implements TTSClient {
       // Highlight this sentence in the reader
       this.controller?.dispatchSpeakMark(mark);
       yield { code: 'boundary', mark: mark.name } as TTSMessageEvent;
-
-      // Wait until the next sentence starts
-      await this.#waitUntilTime(nextSentenceStart, signal);
     }
 
     if (signal.aborted) {
@@ -480,16 +479,8 @@ export class AudiobookTTSClient implements TTSClient {
       return;
     }
 
-    // Wait for audio to finish naturally
-    if (!this.#audioEl.ended) {
-      await new Promise<void>((resolve) => {
-        const onEnded = () => resolve();
-        const onAbort = () => resolve();
-        this.#audioEl!.addEventListener('ended', onEnded, { once: true });
-        signal.addEventListener('abort', onAbort, { once: true });
-      });
-    }
-
+    // Yield end so the controller immediately calls forward() for the next
+    // page. Audio continues playing in the background.
     yield { code: 'end' } as TTSMessageEvent;
   }
 

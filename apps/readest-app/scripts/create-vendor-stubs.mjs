@@ -16,7 +16,7 @@ const stubs = [
     content:
       '// stub for SSR build — real WASM loaded at runtime\n' +
       'export default async function init(_input) {}\n' +
-      'export function simplecc(text) { return text; }\n',
+      'export function simplecc(text, _variant) { return text; }\n',
   },
 ];
 

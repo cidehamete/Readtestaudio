@@ -87,8 +87,18 @@ export class AudiobookTTSClient implements TTSClient {
       this.#audioEl.preload = 'auto';
       this.#audioEl.playbackRate = this.#playbackRate;
       this.#audioEl.preservesPitch = true;
-      (this.#audioEl as any).mozPreservesPitch = true;
-      (this.#audioEl as any).webkitPreservesPitch = true;
+      (
+        this.#audioEl as HTMLAudioElement & {
+          mozPreservesPitch?: boolean;
+          webkitPreservesPitch?: boolean;
+        }
+      ).mozPreservesPitch = true;
+      (
+        this.#audioEl as HTMLAudioElement & {
+          mozPreservesPitch?: boolean;
+          webkitPreservesPitch?: boolean;
+        }
+      ).webkitPreservesPitch = true;
       this.#audioEl.addEventListener('timeupdate', this.#handleTimeUpdate);
       // Save position every 10 seconds during playback
       this.#positionSaveIntervalId = setInterval(() => this.#savePosition(), 10_000);

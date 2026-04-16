@@ -528,7 +528,7 @@ export const useTTSControl = ({ bookKey, onRequestHidePanel }: UseTTSControlProp
         const ttsController = new TTSController(
           appService,
           view,
-          !!user?.id,
+          true, // personal fork: skip auth gate so TTS panel always opens
           preprocessSSMLForTTS,
           handleSectionChange,
           audiobookManifestUrl,

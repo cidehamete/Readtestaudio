@@ -99,6 +99,7 @@ interface BookshelfItemProps {
   handleBookDelete: (book: Book, syncBooks?: boolean) => Promise<boolean>;
   handleSetSelectMode: (selectMode: boolean) => void;
   handleShowDetailsBook: (book: Book) => void;
+  handleShowAudiobookLink: (book: Book) => void;
   handleLibraryNavigation: (targetGroup: string) => void;
   handleUpdateReadingStatus: (book: Book, status: ReadingStatus | undefined) => void;
 }
@@ -117,6 +118,7 @@ const BookshelfItem: React.FC<BookshelfItemProps> = ({
   handleBookDownload,
   handleSetSelectMode,
   handleShowDetailsBook,
+  handleShowAudiobookLink,
   handleLibraryNavigation,
   handleUpdateReadingStatus,
 }) => {
@@ -419,6 +421,7 @@ const BookshelfItem: React.FC<BookshelfItemProps> = ({
               handleBookUpload={handleBookUpload}
               handleBookDownload={handleBookDownload}
               showBookDetailsModal={showBookDetailsModal}
+              showAudiobookLinkModal={handleShowAudiobookLink}
             />
           ) : (
             <GroupItem

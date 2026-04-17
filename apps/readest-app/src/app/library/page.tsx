@@ -58,6 +58,7 @@ import { KeyboardShortcutsHelp } from '@/components/KeyboardShortcutsHelp';
 import { BookDetailModal } from '@/components/metadata';
 import { UpdaterWindow } from '@/components/UpdaterWindow';
 import { CatalogDialog } from './components/OPDSDialog';
+import { AudiobookLinkDialog } from './components/AudiobookLinkDialog';
 import { MigrateDataWindow } from './components/MigrateDataWindow';
 import { BackupWindow } from './components/BackupWindow';
 import { useDragDropImport } from './hooks/useDragDropImport';
@@ -119,6 +120,7 @@ const LibraryPageContent = ({ searchParams }: { searchParams: ReadonlyURLSearchP
   const [isSelectAll, setIsSelectAll] = useState(false);
   const [isSelectNone, setIsSelectNone] = useState(false);
   const [showDetailsBook, setShowDetailsBook] = useState<Book | null>(null);
+  const [audiobookLinkBook, setAudiobookLinkBook] = useState<Book | null>(null);
   const [currentGroupPath, setCurrentGroupPath] = useState<string | undefined>(undefined);
   const [currentSeriesAuthorGroup, setCurrentSeriesAuthorGroup] = useState<{
     groupBy: typeof LibraryGroupByType.Series | typeof LibraryGroupByType.Author;
@@ -845,6 +847,10 @@ const LibraryPageContent = ({ searchParams }: { searchParams: ReadonlyURLSearchP
     setShowDetailsBook(book);
   };
 
+  const handleShowAudiobookLink = (book: Book) => {
+    setAudiobookLinkBook(book);
+  };
+
   const handleNavigateToPath = (path: string | undefined) => {
     const group = path ? getGroupId(path) || '' : '';
     setIsSelectAll(false);
@@ -970,6 +976,7 @@ const LibraryPageContent = ({ searchParams }: { searchParams: ReadonlyURLSearchP
                 handleBookDelete={handleBookDelete('both')}
                 handleSetSelectMode={handleSetSelectMode}
                 handleShowDetailsBook={handleShowDetailsBook}
+                handleShowAudiobookLink={handleShowAudiobookLink}
                 handleLibraryNavigation={handleLibraryNavigation}
                 booksTransferProgress={booksTransferProgress}
                 handlePushLibrary={pushLibrary}
@@ -1006,6 +1013,9 @@ const LibraryPageContent = ({ searchParams }: { searchParams: ReadonlyURLSearchP
           handleBookDeleteLocalCopy={handleBookDelete('local')}
           handleBookMetadataUpdate={handleUpdateMetadata}
         />
+      )}
+      {audiobookLinkBook && (
+        <AudiobookLinkDialog book={audiobookLinkBook} onClose={() => setAudiobookLinkBook(null)} />
       )}
       {isTransferQueueOpen && (
         <ModalPortal>

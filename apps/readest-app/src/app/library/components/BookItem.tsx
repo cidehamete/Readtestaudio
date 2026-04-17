@@ -1,5 +1,5 @@
 import clsx from 'clsx';
-import { MdCheckCircle, MdCheckCircleOutline } from 'react-icons/md';
+import { MdCheckCircle, MdCheckCircleOutline, MdHeadphones } from 'react-icons/md';
 import {
   LiaCloudUploadAltSolid,
   LiaCloudDownloadAltSolid,
@@ -16,6 +16,7 @@ import { useResponsiveSize } from '@/hooks/useResponsiveSize';
 import { LibraryCoverFitType, LibraryViewModeType } from '@/types/settings';
 import { navigateToLogin } from '@/utils/nav';
 import { formatAuthors, formatDescription } from '@/utils/book';
+import { hasAudiobookLinked } from '@/hooks/useAudiobookLink';
 import ReadingProgress from './ReadingProgress';
 import BookCover from '@/components/BookCover';
 
@@ -29,6 +30,7 @@ interface BookItemProps {
   handleBookUpload: (book: Book) => void;
   handleBookDownload: (book: Book, options?: { redownload?: boolean; queued?: boolean }) => void;
   showBookDetailsModal: (book: Book) => void;
+  showAudiobookLinkModal?: (book: Book) => void;
 }
 
 const BookItem: React.FC<BookItemProps> = ({
@@ -41,6 +43,7 @@ const BookItem: React.FC<BookItemProps> = ({
   handleBookUpload,
   handleBookDownload,
   showBookDetailsModal,
+  showAudiobookLinkModal,
 }) => {
   const _ = useTranslation();
   const router = useRouter();
@@ -78,6 +81,15 @@ const BookItem: React.FC<BookItemProps> = ({
         />
         {bookSelected && (
           <div className='absolute inset-0 bg-black opacity-30 transition-opacity duration-300'></div>
+        )}
+        {hasAudiobookLinked(book.hash) && (
+          <div
+            className='bg-primary text-primary-content absolute left-1 top-1 flex items-center justify-center rounded-full p-1 shadow-md'
+            title={_('Audiobook linked')}
+            aria-label={_('Audiobook linked')}
+          >
+            <MdHeadphones size={iconSize15} />
+          </div>
         )}
         {isSelectMode && (
           <div className='absolute bottom-1 right-1'>
@@ -129,6 +141,25 @@ const BookItem: React.FC<BookItemProps> = ({
         >
           {(book.progress || book.readingStatus) && <ReadingProgress book={book} />}
           <div className='flex items-center justify-center gap-x-2'>
+            {/* Audiobook link button — visible on web (no native context menu) */}
+            {!appService?.hasContextMenu && showAudiobookLinkModal && (
+              <button
+                aria-label={_('Link Audiobook')}
+                title={
+                  hasAudiobookLinked(book.hash)
+                    ? _('Audiobook linked — click to change')
+                    : _('Link Audiobook')
+                }
+                className={clsx(
+                  'audiobook-link-button -m-2 p-2 sm:opacity-0 sm:group-hover:opacity-100',
+                  hasAudiobookLinked(book.hash) && 'text-primary',
+                )}
+                onPointerDown={(e) => e.stopPropagation()}
+                onClick={() => showAudiobookLinkModal(book)}
+              >
+                <MdHeadphones size={iconSize15} />
+              </button>
+            )}
             {!appService?.isMobile && (
               <button
                 aria-label={_('Show Book Details')}

@@ -6,6 +6,7 @@ import { useReaderStore } from '@/store/readerStore';
 import { useTranslation } from '@/hooks/useTranslation';
 import { useResponsiveSize } from '@/hooks/useResponsiveSize';
 import { useTTSControl } from '@/app/reader/hooks/useTTSControl';
+import { eventDispatcher } from '@/utils/event';
 import { getPopupPosition, Position } from '@/utils/sel';
 import { Insets } from '@/types/misc';
 import { Overlay } from '@/components/Overlay';
@@ -121,8 +122,16 @@ const TTSControl: React.FC<TTSControlProps> = ({ bookKey, gridInsets }) => {
   };
 
   const togglePopup = () => {
+    // If TTS hasn't been started yet, the button acts as a "start" button:
+    // fire tts-speak and let the controller initialize. The popup has nothing
+    // to show pre-init, so we don't toggle it on this first tap. Once the
+    // controller is ready, subsequent taps toggle the panel as usual.
+    if (!tts.isTTSActive) {
+      eventDispatcher.dispatch('tts-speak', { bookKey });
+      return;
+    }
     updatePanelPosition();
-    if (!showPanel && tts.isTTSActive) {
+    if (!showPanel) {
       tts.refreshTtsLang();
     }
     setShowPanel((prev) => !prev);
@@ -159,33 +168,29 @@ const TTSControl: React.FC<TTSControlProps> = ({ bookKey, gridInsets }) => {
       )}
       {showPanel && <Overlay onDismiss={handleDismissPopup} />}
       {/*
-       * Persistent floating TTS / audiobook trigger. Always rendered once
-       * TTS clients have initialized — no hover gating, no auto-hide — so
-       * users (especially on touch devices where hover is an awkward
-       * proxy) can start or re-open the audio panel at any time.
+       * Persistent floating TTS / audiobook trigger. Always rendered — no
+       * hover gating, no init gating, no auto-hide — so users can start or
+       * re-open the audio panel at any time. Before TTS has been started,
+       * the button dispatches a tts-speak event on tap (see togglePopup).
+       * `ttsInited` is passed as `true` so the icon always looks clickable;
+       * the underlying initialization state is handled by the click handler.
        */}
-      {tts.ttsClientsInited && (
-        <div
-          ref={iconRef}
-          className={clsx(
-            'absolute z-40 h-12 w-12',
-            'transition-transform duration-300',
-            viewSettings?.rtl ? 'left-8' : 'right-6',
-            !appService?.hasSafeAreaInset && 'bottom-[70px] sm:bottom-14',
-          )}
-          style={{
-            bottom: appService?.hasSafeAreaInset
-              ? `calc(env(safe-area-inset-bottom, 0px) * ${appService?.isIOSApp ? 0.33 : 1} + ${hoveredBookKey ? 70 : 52}px)`
-              : undefined,
-          }}
-        >
-          <TTSIcon
-            isPlaying={tts.isPlaying}
-            ttsInited={tts.ttsClientsInited}
-            onClick={togglePopup}
-          />
-        </div>
-      )}
+      <div
+        ref={iconRef}
+        className={clsx(
+          'absolute z-40 h-12 w-12',
+          'transition-transform duration-300',
+          viewSettings?.rtl ? 'left-8' : 'right-6',
+          !appService?.hasSafeAreaInset && 'bottom-[70px] sm:bottom-14',
+        )}
+        style={{
+          bottom: appService?.hasSafeAreaInset
+            ? `calc(env(safe-area-inset-bottom, 0px) * ${appService?.isIOSApp ? 0.33 : 1} + ${hoveredBookKey ? 70 : 52}px)`
+            : undefined,
+        }}
+      >
+        <TTSIcon isPlaying={tts.isPlaying} ttsInited onClick={togglePopup} />
+      </div>
       {showPanel && panelPosition && trianglePosition && tts.ttsClientsInited && (
         <Popup
           width={popupWidth}
@@ -221,7 +226,14 @@ const TTSControl: React.FC<TTSControlProps> = ({ bookKey, gridInsets }) => {
           />
         </Popup>
       )}
-      {tts.showIndicator && tts.showTTSBar && tts.ttsClientsInited && (
+      {/*
+       * TTSBar auto-shows during audiobook playback even if the user hasn't
+       * explicitly toggled `showTTSBar`, because the bar has the transport
+       * controls (skip ±15/30s, play/pause, backward/forward) that are most
+       * useful for audiobook listening. For non-audiobook TTS we keep the
+       * original opt-in behavior so the bar doesn't appear unprompted.
+       */}
+      {tts.showIndicator && (tts.showTTSBar || tts.isAudiobookActive) && tts.ttsClientsInited && (
         <TTSBar
           bookKey={bookKey}
           isPlaying={tts.isPlaying}

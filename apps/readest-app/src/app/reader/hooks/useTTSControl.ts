@@ -166,6 +166,29 @@ export const useTTSControl = ({ bookKey, onRequestHidePanel }: UseTTSControlProp
       setAudiobookDuration(duration);
       setAudiobookChapterTitle(chapterTitle);
       setAudiobookNarrator(narratorName);
+
+      // Feed the iOS lock screen / Android media notification / Control Center
+      // its scrubber position. Guarded by finite/positive values because iOS
+      // Safari throws on NaN or negative durations. Only the Web MediaSession
+      // supports setPositionState; TauriMediaSession has its own update path.
+      if (
+        typeof navigator !== 'undefined' &&
+        'mediaSession' in navigator &&
+        Number.isFinite(duration) &&
+        duration > 0 &&
+        Number.isFinite(currentTime) &&
+        currentTime >= 0
+      ) {
+        try {
+          navigator.mediaSession.setPositionState({
+            duration,
+            position: Math.min(currentTime, duration),
+            playbackRate: 1,
+          });
+        } catch {
+          // Some browsers reject if playbackRate != actual audio rate. Best-effort.
+        }
+      }
     };
 
     const handleSpeakMark = (e: Event) => {

@@ -96,6 +96,34 @@ export const useTTSMediaSession = ({ bookKey }: UseTTSMediaSessionProps) => {
         album: metadata.album,
         artwork: artworkImage,
       });
+    } else {
+      // Web MediaSession (iOS Safari / Chromium): prime the lock-screen /
+      // Control Center display with initial metadata so the user sees book
+      // title + author + cover from the moment audio starts, instead of
+      // waiting for the first sentence mark to fire (which can take a few
+      // seconds into the first paragraph).
+      const bookData = getBookData(bookKey);
+      if (!bookData || !bookData.book) return;
+      const { title, author, coverImageUrl } = bookData.book;
+      const progress = getProgress(bookKey);
+      const { sectionLabel } = progress || {};
+      try {
+        mediaSession.metadata = new MediaMetadata({
+          title: sectionLabel || title || '',
+          artist: author || '',
+          album: title || '',
+          artwork: [
+            {
+              src: coverImageUrl || '/icon.png',
+              sizes: '512x512',
+              type: 'image/png',
+            },
+          ],
+        });
+      } catch (e) {
+        // MediaMetadata can throw in very old browsers; ignore.
+        console.warn('[TTS] MediaMetadata init failed:', e);
+      }
     }
   };
 

@@ -126,6 +126,7 @@ export class AudiobookTTSClient implements TTSClient {
     this.#audioEl = null;
     this.#manifest = null;
     this.#timestampsCache.clear();
+    this.#currentChapterIndex = -1;
     this.initialized = false;
   }
 
@@ -443,8 +444,12 @@ export class AudiobookTTSClient implements TTSClient {
       return;
     }
 
-    // Load new audio source only when the chapter changes; restore saved position
-    if (this.#currentChapterIndex !== chapter.index) {
+    // Load new audio source only when the chapter changes (i.e. first
+    // speak() of a chapter). Between pages within the same chapter, the
+    // audio element keeps playing continuously — stop() only pauses it,
+    // doesn't reset currentTime.
+    const chapterChanged = this.#currentChapterIndex !== chapter.index;
+    if (chapterChanged) {
       // Swap in preloaded element if it already has the right src
       if (
         this.#nextAudioEl &&
@@ -453,10 +458,12 @@ export class AudiobookTTSClient implements TTSClient {
       ) {
         const prev = this.#audioEl;
         prev.pause();
+        prev.removeEventListener('timeupdate', this.#handleTimeUpdate);
         this.#audioEl = this.#nextAudioEl;
+        this.#audioEl.addEventListener('timeupdate', this.#handleTimeUpdate);
         this.#nextAudioEl = prev; // recycle for next preload
         this.#nextAudioEl.src = '';
-      } else {
+      } else if (this.#audioEl.src !== chapter.audio_url) {
         this.#audioEl.src = chapter.audio_url;
       }
       this.#audioEl.playbackRate = this.#playbackRate;
@@ -473,7 +480,8 @@ export class AudiobookTTSClient implements TTSClient {
 
     // Seed search index with a 2s backward tolerance so a sentence that
     // started just before the current audio time can still be matched.
-    const searchSeedTime = Math.max(0, this.#audioEl.currentTime - 2.0);
+    const pageStartAudioTime = this.#audioEl.currentTime;
+    const searchSeedTime = Math.max(0, pageStartAudioTime - 2.0);
     const audioStartIdx = this.#wordIndexAtTime(timestamps.words, searchSeedTime);
     const sentenceStartTimes = this.#buildSentenceStartTimes(
       timestamps.words,
@@ -481,20 +489,14 @@ export class AudiobookTTSClient implements TTSClient {
       audioStartIdx,
     );
 
-    // Compute the page's expected audio end time. We use this as both a
-    // hard cap on per-mark waiting (so we never hang on an unmatched mark
-    // whose extrapolated time overshoots reality) and as the trigger for
-    // the 'end' event (so forward() is called at the right audio position
-    // regardless of how many marks matched).
     const totalAudioDuration = timestamps.words[timestamps.words.length - 1]?.end ?? 0;
     const avgWordDuration =
       timestamps.words.length > 0 ? totalAudioDuration / timestamps.words.length : 0.35;
-    const pageStartAudioTime = this.#audioEl.currentTime;
-    const totalPageWords = marks.reduce((sum, m) => sum + m.text.trim().split(/\s+/).length, 0);
-    // Small floor so near-empty pages (e.g. chapter titles) don't advance instantly.
-    const pageExpectedEndTime = Math.max(
-      pageStartAudioTime + totalPageWords * avgWordDuration,
-      pageStartAudioTime + 1.0,
+
+    console.info(
+      `[AudiobookTTSClient] speak: chapter=${chapter.index} chapterChanged=${chapterChanged} ` +
+        `audioT=${pageStartAudioTime.toFixed(2)} marks=${marks.length} ` +
+        `sentenceTimes=[${sentenceStartTimes.map((t) => t.toFixed(1)).join(', ')}]`,
     );
 
     try {
@@ -505,40 +507,51 @@ export class AudiobookTTSClient implements TTSClient {
       return;
     }
 
-    // Iterate through sentence marks, highlighting each as audio reaches it.
-    // The loop exits early if audio has already advanced past the page's
-    // expected end time — that way forward() fires at the right moment
-    // even when some marks couldn't be matched to the audio timeline.
+    // Dispatch each mark when audio reaches its estimated start time.
     for (let i = 0; i < marks.length; i++) {
       if (signal.aborted) break;
-      if (this.#audioEl.currentTime >= pageExpectedEndTime) break;
 
       const mark = marks[i]!;
-      // Cap per-mark wait at the page's expected end time so an extrapolated
-      // sentence time that overshoots reality can't stall page advancement.
-      const sentenceStart = Math.min(sentenceStartTimes[i] ?? 0, pageExpectedEndTime);
+      const sentenceStart = sentenceStartTimes[i] ?? this.#audioEl.currentTime;
 
-      // Only seek forward if audio has fallen behind (don't seek backwards
-      // into already-played content).
+      // Only seek forward if audio has fallen significantly behind.
+      // Never seek backwards (would skip already-played content).
       if (this.#audioEl.currentTime < sentenceStart - SEEK_DRIFT_THRESHOLD_SEC) {
+        console.info(
+          `[AudiobookTTSClient] seek: ${this.#audioEl.currentTime.toFixed(2)} → ${sentenceStart.toFixed(2)}`,
+        );
         this.#audioEl.currentTime = sentenceStart;
       }
 
-      // Wait until we reach this sentence in the audio
-      await this.#waitUntilTime(sentenceStart + 0.05, signal);
+      // Wait until audio reaches this sentence's start
+      await this.#waitUntilTime(sentenceStart, signal);
 
-      if (signal.aborted || this.#audioEl.ended) break;
+      if (signal.aborted) break;
+      if (this.#audioEl.ended) {
+        // Chapter ended mid-page — dispatch remaining marks rapidly
+        // so the reader still advances to the chapter end.
+        this.controller?.dispatchSpeakMark(mark);
+        yield { code: 'boundary', mark: mark.name } as TTSMessageEvent;
+        continue;
+      }
 
-      // Highlight this sentence in the reader
       this.controller?.dispatchSpeakMark(mark);
       yield { code: 'boundary', mark: mark.name } as TTSMessageEvent;
     }
 
-    // Wait until audio has actually played through this page's worth of
-    // content before yielding 'end' — prevents pages from advancing faster
-    // than the audio itself.
-    if (!signal.aborted && !this.#audioEl.ended) {
-      await this.#waitUntilTime(pageExpectedEndTime, signal);
+    // Compute the end time for this page: last mark's start + its word count
+    // times avg word duration. Wait for audio to reach it before yielding
+    // 'end', so forward() fires in rhythm with the spoken audio rather than
+    // instantly the moment the loop finishes.
+    if (!signal.aborted) {
+      const lastMarkIndex = sentenceStartTimes.length - 1;
+      const lastMarkStart = sentenceStartTimes[lastMarkIndex] ?? pageStartAudioTime;
+      const lastMarkWords = marks[lastMarkIndex]?.text.trim().split(/\s+/).length ?? 1;
+      const pageEndAudioTime = lastMarkStart + lastMarkWords * avgWordDuration;
+
+      if (!this.#audioEl.ended && this.#audioEl.currentTime < pageEndAudioTime) {
+        await this.#waitUntilTime(pageEndAudioTime, signal);
+      }
     }
 
     if (signal.aborted) {
@@ -548,8 +561,10 @@ export class AudiobookTTSClient implements TTSClient {
       return;
     }
 
-    // Yield end so the controller immediately calls forward() for the next
-    // page. Audio continues playing in the background.
+    console.info(
+      `[AudiobookTTSClient] page done → end (audioT=${this.#audioEl.currentTime.toFixed(2)})`,
+    );
+    // Audio continues playing; controller calls forward() on 'end'.
     yield { code: 'end' } as TTSMessageEvent;
   }
 
@@ -569,12 +584,16 @@ export class AudiobookTTSClient implements TTSClient {
   }
 
   async stop(): Promise<void> {
+    // TTSController calls stop() both on user-stop AND between pages
+    // (inside forward()/backward()). We can't tell these cases apart,
+    // so we just pause + save position. The audio stays cued where it
+    // is; the next speak() call will resume from this position without
+    // reloading the src. Shutdown handles real cleanup.
     if (this.#audioEl) {
       this.#savePosition();
       this.#audioEl.pause();
-      this.#audioEl.currentTime = 0;
     }
-    this.#currentChapterIndex = -1;
+    // Keep #currentChapterIndex so same-chapter speak() calls skip reload.
   }
 
   /** Skip backward by the given number of seconds (default 15). */

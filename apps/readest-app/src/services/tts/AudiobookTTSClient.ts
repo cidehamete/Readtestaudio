@@ -198,7 +198,23 @@ export class AudiobookTTSClient implements TTSClient {
    * them, then do a forward-scanning substring search through the word list.
    * Falls back to proportional distribution if no match is found.
    */
-  #buildSentenceStartTimes(words: AudiobookWord[], marks: { text: string }[]): number[] {
+  #wordIndexAtTime(words: AudiobookWord[], time: number): number {
+    if (words.length === 0 || time <= 0) return 0;
+    let lo = 0,
+      hi = words.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      if ((words[mid]?.start ?? 0) <= time) lo = mid;
+      else hi = mid - 1;
+    }
+    return lo;
+  }
+
+  #buildSentenceStartTimes(
+    words: AudiobookWord[],
+    marks: { text: string }[],
+    startIdx = 0,
+  ): number[] {
     const norm = (s: string) =>
       s
         .toLowerCase()
@@ -209,7 +225,7 @@ export class AudiobookTTSClient implements TTSClient {
     const wordNorms = words.map((w) => norm(w.word));
     const totalDuration = words[words.length - 1]?.end ?? 0;
 
-    let searchStartIdx = 0;
+    let searchStartIdx = startIdx;
     const startTimes: number[] = [];
 
     for (let mi = 0; mi < marks.length; mi++) {
@@ -437,7 +453,12 @@ export class AudiobookTTSClient implements TTSClient {
     // Preload the next chapter in the background
     this.#preloadNextChapter(chapter.index);
 
-    const sentenceStartTimes = this.#buildSentenceStartTimes(timestamps.words, marks);
+    const audioStartIdx = this.#wordIndexAtTime(timestamps.words, this.#audioEl.currentTime);
+    const sentenceStartTimes = this.#buildSentenceStartTimes(
+      timestamps.words,
+      marks,
+      audioStartIdx,
+    );
 
     try {
       await this.#audioEl.play();

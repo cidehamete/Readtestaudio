@@ -481,6 +481,22 @@ export class AudiobookTTSClient implements TTSClient {
       audioStartIdx,
     );
 
+    // Compute the page's expected audio end time. We use this as both a
+    // hard cap on per-mark waiting (so we never hang on an unmatched mark
+    // whose extrapolated time overshoots reality) and as the trigger for
+    // the 'end' event (so forward() is called at the right audio position
+    // regardless of how many marks matched).
+    const totalAudioDuration = timestamps.words[timestamps.words.length - 1]?.end ?? 0;
+    const avgWordDuration =
+      timestamps.words.length > 0 ? totalAudioDuration / timestamps.words.length : 0.35;
+    const pageStartAudioTime = this.#audioEl.currentTime;
+    const totalPageWords = marks.reduce((sum, m) => sum + m.text.trim().split(/\s+/).length, 0);
+    // Small floor so near-empty pages (e.g. chapter titles) don't advance instantly.
+    const pageExpectedEndTime = Math.max(
+      pageStartAudioTime + totalPageWords * avgWordDuration,
+      pageStartAudioTime + 1.0,
+    );
+
     try {
       await this.#audioEl.play();
     } catch (e) {
@@ -490,13 +506,17 @@ export class AudiobookTTSClient implements TTSClient {
     }
 
     // Iterate through sentence marks, highlighting each as audio reaches it.
-    // After each mark we yield 'end' immediately so the controller calls
-    // forward() for the next page — the audio keeps streaming uninterrupted.
+    // The loop exits early if audio has already advanced past the page's
+    // expected end time — that way forward() fires at the right moment
+    // even when some marks couldn't be matched to the audio timeline.
     for (let i = 0; i < marks.length; i++) {
       if (signal.aborted) break;
+      if (this.#audioEl.currentTime >= pageExpectedEndTime) break;
 
       const mark = marks[i]!;
-      const sentenceStart = sentenceStartTimes[i] ?? 0;
+      // Cap per-mark wait at the page's expected end time so an extrapolated
+      // sentence time that overshoots reality can't stall page advancement.
+      const sentenceStart = Math.min(sentenceStartTimes[i] ?? 0, pageExpectedEndTime);
 
       // Only seek forward if audio has fallen behind (don't seek backwards
       // into already-played content).
@@ -512,6 +532,13 @@ export class AudiobookTTSClient implements TTSClient {
       // Highlight this sentence in the reader
       this.controller?.dispatchSpeakMark(mark);
       yield { code: 'boundary', mark: mark.name } as TTSMessageEvent;
+    }
+
+    // Wait until audio has actually played through this page's worth of
+    // content before yielding 'end' — prevents pages from advancing faster
+    // than the audio itself.
+    if (!signal.aborted && !this.#audioEl.ended) {
+      await this.#waitUntilTime(pageExpectedEndTime, signal);
     }
 
     if (signal.aborted) {

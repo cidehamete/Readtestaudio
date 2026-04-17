@@ -211,11 +211,22 @@ export class AudiobookTTSClient implements TTSClient {
     return lo;
   }
 
-  #buildSentenceStartTimes(
+  /**
+   * Map each SSML mark (sentence) to a start AND end time in the word-timestamp
+   * array.
+   *
+   * Start: match the first 4 non-trivial words of the sentence against the
+   * word list via forward-scanning substring search.
+   * End: use the matched word index + markWordCount to look up the actual end
+   * time from the word timestamps (far more accurate than start + count×avg).
+   *
+   * Falls back to word-rate extrapolation when matching fails.
+   */
+  #buildSentenceTimings(
     words: AudiobookWord[],
     marks: { text: string }[],
     startIdx = 0,
-  ): number[] {
+  ): { startTimes: number[]; endTimes: number[] } {
     const norm = (s: string) =>
       s
         .toLowerCase()
@@ -225,19 +236,33 @@ export class AudiobookTTSClient implements TTSClient {
 
     const wordNorms = words.map((w) => norm(w.word));
     const totalDuration = words[words.length - 1]?.end ?? 0;
-    // Average seconds per word — used for extrapolating unmatched sentences.
     const avgWordDuration = words.length > 0 ? totalDuration / words.length : 0.35;
 
     let searchStartIdx = startIdx;
     const startTimes: number[] = [];
+    const endTimes: number[] = [];
 
-    // Word count per mark — used for word-rate extrapolation on fallback.
     const markWordCounts = marks.map((m) => m.text.trim().split(/\s+/).length);
+
+    const tryMatch = (keyWords: string[]): number => {
+      if (keyWords.length === 0) return -1;
+      const limit = words.length - keyWords.length;
+      for (let i = searchStartIdx; i <= limit; i++) {
+        let ok = true;
+        for (let j = 0; j < keyWords.length; j++) {
+          if (!wordNorms[i + j]?.includes(keyWords[j]!)) {
+            ok = false;
+            break;
+          }
+        }
+        if (ok) return i;
+      }
+      return -1;
+    };
 
     for (let mi = 0; mi < marks.length; mi++) {
       const mark = marks[mi]!;
 
-      // Take the first 4 words that are longer than 1 character
       const keyWords = mark.text
         .trim()
         .split(/\s+/)
@@ -245,73 +270,40 @@ export class AudiobookTTSClient implements TTSClient {
         .filter((w) => w.length > 1)
         .slice(0, 4);
 
-      if (keyWords.length === 0) {
-        startTimes.push(words[searchStartIdx]?.start ?? 0);
-        continue;
-      }
+      // Try primary match; if that fails, try skipping the first keyword
+      // (handles occasional leading stray tokens).
+      let matchedIdx = tryMatch(keyWords);
+      if (matchedIdx < 0) matchedIdx = tryMatch(keyWords.slice(1));
 
-      let found = false;
-      const limit = words.length - keyWords.length;
+      const markWordCount = markWordCounts[mi]!;
 
-      // Primary pass: try matching starting from current search position
-      for (let i = searchStartIdx; i <= limit; i++) {
-        let match = true;
-        for (let j = 0; j < keyWords.length; j++) {
-          if (!wordNorms[i + j]?.includes(keyWords[j]!)) {
-            match = false;
-            break;
-          }
-        }
-        if (match) {
-          startTimes.push(words[i]!.start);
-          searchStartIdx = i + 1;
-          found = true;
-          break;
-        }
-      }
-
-      if (!found) {
-        // Try with a 1-word offset (handles occasional leading stray words)
-        const shifted = keyWords.slice(1);
-        if (shifted.length > 0) {
-          for (let i = searchStartIdx; i <= limit; i++) {
-            let match = true;
-            for (let j = 0; j < shifted.length; j++) {
-              if (!wordNorms[i + j]?.includes(shifted[j]!)) {
-                match = false;
-                break;
-              }
-            }
-            if (match) {
-              startTimes.push(words[i]!.start);
-              searchStartIdx = i + 1;
-              found = true;
-              break;
-            }
-          }
-        }
-      }
-
-      if (!found) {
-        // Fallback: extrapolate from the previous mark's start + its word count
-        // times the average word duration. Keeps times anchored near the
-        // current audio position rather than jumping back to chapter start.
-        const prevStart =
-          startTimes[mi - 1] ?? words[searchStartIdx]?.start ?? words[startIdx]?.start ?? 0;
-        const prevWordCount = mi > 0 ? markWordCounts[mi - 1]! : 0;
-        startTimes.push(prevStart + prevWordCount * avgWordDuration);
+      if (matchedIdx >= 0) {
+        startTimes.push(words[matchedIdx]!.start);
+        // End = actual end time of the last word covered by this mark's length
+        const endIdx = Math.min(matchedIdx + markWordCount - 1, words.length - 1);
+        endTimes.push(words[endIdx]!.end);
+        searchStartIdx = matchedIdx + 1;
+      } else {
+        // Fallback: extrapolate from previous mark's end.
+        const prevEnd =
+          endTimes[mi - 1] ?? words[searchStartIdx]?.start ?? words[startIdx]?.start ?? 0;
+        startTimes.push(prevEnd);
+        endTimes.push(prevEnd + markWordCount * avgWordDuration);
       }
     }
 
-    // Enforce monotonic non-decreasing start times so later sentences never
-    // resolve to a time before an earlier one (prevents "past-time" rushes).
+    // Enforce monotonic non-decreasing start times — matched/extrapolated
+    // values can occasionally drift backward.
     for (let i = 1; i < startTimes.length; i++) {
       if (startTimes[i]! < startTimes[i - 1]!) {
         startTimes[i] = startTimes[i - 1]! + avgWordDuration;
       }
+      if (endTimes[i]! < startTimes[i]!) {
+        endTimes[i] = startTimes[i]! + avgWordDuration;
+      }
     }
 
-    return startTimes;
+    return { startTimes, endTimes };
   }
 
   // ── Preload helpers ───────────────────────────────────────────────────────────
@@ -483,20 +475,14 @@ export class AudiobookTTSClient implements TTSClient {
     const pageStartAudioTime = this.#audioEl.currentTime;
     const searchSeedTime = Math.max(0, pageStartAudioTime - 2.0);
     const audioStartIdx = this.#wordIndexAtTime(timestamps.words, searchSeedTime);
-    const sentenceStartTimes = this.#buildSentenceStartTimes(
-      timestamps.words,
-      marks,
-      audioStartIdx,
-    );
-
-    const totalAudioDuration = timestamps.words[timestamps.words.length - 1]?.end ?? 0;
-    const avgWordDuration =
-      timestamps.words.length > 0 ? totalAudioDuration / timestamps.words.length : 0.35;
+    const { startTimes: sentenceStartTimes, endTimes: sentenceEndTimes } =
+      this.#buildSentenceTimings(timestamps.words, marks, audioStartIdx);
 
     console.info(
       `[AudiobookTTSClient] speak: chapter=${chapter.index} chapterChanged=${chapterChanged} ` +
         `audioT=${pageStartAudioTime.toFixed(2)} marks=${marks.length} ` +
-        `sentenceTimes=[${sentenceStartTimes.map((t) => t.toFixed(1)).join(', ')}]`,
+        `sentenceTimes=[${sentenceStartTimes.map((t) => t.toFixed(1)).join(', ')}] ` +
+        `end=${sentenceEndTimes[sentenceEndTimes.length - 1]?.toFixed(1)}`,
     );
 
     try {
@@ -539,16 +525,13 @@ export class AudiobookTTSClient implements TTSClient {
       yield { code: 'boundary', mark: mark.name } as TTSMessageEvent;
     }
 
-    // Compute the end time for this page: last mark's start + its word count
-    // times avg word duration. Wait for audio to reach it before yielding
-    // 'end', so forward() fires in rhythm with the spoken audio rather than
-    // instantly the moment the loop finishes.
+    // Wait for the end-time of this page's LAST sentence (computed from
+    // real word-level timestamps when matched). This prevents yielding
+    // 'end' before the audio has finished speaking the block, AND prevents
+    // overshooting into the next block — which would make the next block's
+    // marks all resolve instantly and the reader would skip a paragraph.
     if (!signal.aborted) {
-      const lastMarkIndex = sentenceStartTimes.length - 1;
-      const lastMarkStart = sentenceStartTimes[lastMarkIndex] ?? pageStartAudioTime;
-      const lastMarkWords = marks[lastMarkIndex]?.text.trim().split(/\s+/).length ?? 1;
-      const pageEndAudioTime = lastMarkStart + lastMarkWords * avgWordDuration;
-
+      const pageEndAudioTime = sentenceEndTimes[sentenceEndTimes.length - 1] ?? pageStartAudioTime;
       if (!this.#audioEl.ended && this.#audioEl.currentTime < pageEndAudioTime) {
         await this.#waitUntilTime(pageEndAudioTime, signal);
       }

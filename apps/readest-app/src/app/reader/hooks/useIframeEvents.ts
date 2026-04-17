@@ -69,6 +69,7 @@ export const useLongPressEvent = (
   bookKey: string,
   handleImagePress: (src: string) => void,
   handleTablePress: (html: string) => void,
+  handleWordPress?: (word: string) => void,
 ) => {
   const handleLongPress = (msg: MessageEvent) => {
     if (msg.data && msg.data.bookKey === bookKey && msg.data.type === 'iframe-long-press') {
@@ -76,6 +77,8 @@ export const useLongPressEvent = (
         handleImagePress(msg.data.src);
       } else if (msg.data.elementType === 'table') {
         handleTablePress(msg.data.html);
+      } else if (msg.data.elementType === 'word' && handleWordPress) {
+        handleWordPress(msg.data.word as string);
       }
     }
   };

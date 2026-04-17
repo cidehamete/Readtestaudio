@@ -466,8 +466,124 @@ export const addLongPressListeners = (bookKey: string, doc: Document) => {
 
   observer.observe(doc.body, { childList: true, subtree: true });
 
+  // ── Text long-press → audiobook word seek ─────────────────────────────────
+  // When the user long-presses a text node (not an image or table), find the
+  // word under the touch point and post an 'iframe-long-press' message with
+  // elementType 'word'. The parent hook (useLongPressEvent) will dispatch a
+  // 'tts-audiobook-seek' event if an audiobook is currently playing — letting
+  // the reader jump the narrator to that word without requiring the headphones
+  // icon tap from the annotation popup.
+  let textPressTimer: ReturnType<typeof setTimeout> | null = null;
+  let textPressStart: { x: number; y: number } | null = null;
+  const TEXT_LONG_PRESS_MS = 500;
+  const TEXT_MOVE_THRESHOLD = 10;
+
+  /**
+   * Given a point, return the single word under the caret (empty string if
+   * the point doesn't land on a text node). Works on WebKit (iOS/Chrome) and
+   * Firefox via the two draft APIs.
+   */
+  const getWordAtPoint = (x: number, y: number): string => {
+    // Try caretRangeFromPoint (WebKit / Chrome)
+    let range: Range | null = null;
+    if (typeof doc.caretRangeFromPoint === 'function') {
+      range = doc.caretRangeFromPoint(x, y);
+    } else {
+      // Firefox: caretPositionFromPoint
+      const pos = (
+        doc as unknown as {
+          caretPositionFromPoint?: (
+            x: number,
+            y: number,
+          ) => { offsetNode: Node; offset: number } | null;
+        }
+      ).caretPositionFromPoint?.(x, y);
+      if (pos) {
+        range = doc.createRange();
+        range.setStart(pos.offsetNode, pos.offset);
+        range.collapse(true);
+      }
+    }
+
+    if (!range || range.startContainer.nodeType !== Node.TEXT_NODE) return '';
+
+    const textNode = range.startContainer as Text;
+    const text = textNode.textContent ?? '';
+    const offset = range.startOffset;
+
+    // Expand backward to the nearest word boundary
+    let start = offset;
+    while (start > 0 && /\w/.test(text[start - 1]!)) start--;
+
+    // Expand forward to the nearest word boundary
+    let end = offset;
+    while (end < text.length && /\w/.test(text[end]!)) end++;
+
+    return text.slice(start, end);
+  };
+
+  const handleTextLongPress = (x: number, y: number) => {
+    const word = getWordAtPoint(x, y);
+    if (!word) return;
+    window.postMessage({ type: 'iframe-long-press', bookKey, elementType: 'word', word }, '*');
+  };
+
+  const onTextTouchStart = (event: TouchEvent) => {
+    const target = event.target as HTMLElement;
+    // Skip if the target is an image, SVG, or table — those have their own handler
+    if (
+      target.localName === 'img' ||
+      target.closest('svg') ||
+      target.localName === 'table' ||
+      target.closest('table')
+    ) {
+      return;
+    }
+    const touch = event.touches[0];
+    if (!touch) return;
+    textPressStart = { x: touch.clientX, y: touch.clientY };
+    if (textPressTimer !== null) clearTimeout(textPressTimer);
+    const { clientX, clientY } = touch;
+    textPressTimer = setTimeout(() => {
+      textPressTimer = null;
+      textPressStart = null;
+      handleTextLongPress(clientX, clientY);
+    }, TEXT_LONG_PRESS_MS);
+  };
+
+  const onTextTouchMove = (event: TouchEvent) => {
+    if (!textPressStart || textPressTimer === null) return;
+    const touch = event.touches[0];
+    if (!touch) return;
+    const dx = touch.clientX - textPressStart.x;
+    const dy = touch.clientY - textPressStart.y;
+    if (Math.sqrt(dx * dx + dy * dy) > TEXT_MOVE_THRESHOLD) {
+      clearTimeout(textPressTimer);
+      textPressTimer = null;
+      textPressStart = null;
+    }
+  };
+
+  const onTextTouchEnd = () => {
+    if (textPressTimer !== null) {
+      clearTimeout(textPressTimer);
+      textPressTimer = null;
+    }
+    textPressStart = null;
+  };
+
+  doc.addEventListener('touchstart', onTextTouchStart, { passive: true });
+  doc.addEventListener('touchmove', onTextTouchMove, { passive: true });
+  doc.addEventListener('touchend', onTextTouchEnd);
+  doc.addEventListener('touchcancel', onTextTouchEnd);
+
   return () => {
     observer.disconnect();
     pressTimers.forEach((timer) => clearTimeout(timer));
+    if (textPressTimer !== null) clearTimeout(textPressTimer);
+    doc.removeEventListener('touchstart', onTextTouchStart);
+    doc.removeEventListener('touchmove', onTextTouchMove);
+    doc.removeEventListener('touchend', onTextTouchEnd);
+    doc.removeEventListener('touchcancel', onTextTouchEnd);
   };
 };

@@ -60,6 +60,7 @@ import { useTextTranslation } from '../hooks/useTextTranslation';
 import { useBookCoverAutoSave } from '../hooks/useAutoSaveBookCover';
 import { useDiscordPresence } from '@/hooks/useDiscordPresence';
 import { manageSyntaxHighlighting } from '@/utils/highlightjs';
+import { eventDispatcher } from '@/utils/event';
 import { getViewInsets } from '@/utils/insets';
 import { handleA11yNavigation } from '@/utils/a11y';
 import { isCJKLang } from '@/utils/lang';
@@ -440,7 +441,15 @@ const FoliateViewer: React.FC<{
     setCurrentImageIndex(0);
   }, []);
 
-  useLongPressEvent(bookKey, handleImagePress, handleTablePress);
+  const handleWordPress = useCallback(
+    (word: string) => {
+      if (!word) return;
+      eventDispatcher.dispatch('tts-audiobook-seek', { bookKey, seekText: word });
+    },
+    [bookKey],
+  );
+
+  useLongPressEvent(bookKey, handleImagePress, handleTablePress, handleWordPress);
 
   useFoliateEvents(viewRef.current, {
     onLoad: docLoadHandler,

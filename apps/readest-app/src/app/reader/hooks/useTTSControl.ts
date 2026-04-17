@@ -112,12 +112,14 @@ export const useTTSControl = ({ bookKey, onRequestHidePanel }: UseTTSControlProp
     eventDispatcher.on('tts-forward', handleTTSForward);
     eventDispatcher.on('tts-backward', handleTTSBackward);
     eventDispatcher.on('tts-toggle-play', handleTTSTogglePlay);
+    eventDispatcher.on('tts-audiobook-seek', handleTTSAudiobookSeek);
     return () => {
       eventDispatcher.off('tts-speak', handleTTSSpeak);
       eventDispatcher.off('tts-stop', handleTTSStop);
       eventDispatcher.off('tts-forward', handleTTSForward);
       eventDispatcher.off('tts-backward', handleTTSBackward);
       eventDispatcher.off('tts-toggle-play', handleTTSTogglePlay);
+      eventDispatcher.off('tts-audiobook-seek', handleTTSAudiobookSeek);
       if (ttsControllerRef.current) {
         ttsControllerRef.current.shutdown();
         ttsControllerRef.current = null;
@@ -455,6 +457,29 @@ export const useTTSControl = ({ bookKey, onRequestHidePanel }: UseTTSControlProp
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [appService],
   );
+
+  // handleTTSAudiobookSeek — jump the audiobook narrator to a specific word.
+  // Fired by useLongPressEvent when the user long-presses a text word while
+  // an audiobook is playing. No-op if TTS is not active or not an audiobook.
+  const handleTTSAudiobookSeek = async (event: CustomEvent) => {
+    const { bookKey: ttsBookKey, seekText } = event.detail as {
+      bookKey: string;
+      seekText: string;
+    };
+    if (bookKey !== ttsBookKey) return;
+    const existingController = ttsControllerRef.current;
+    if (!existingController?.ttsAudiobookClient?.initialized || !seekText) return;
+
+    const seeked = await existingController.ttsAudiobookClient.seekToText(seekText);
+    if (seeked) {
+      try {
+        await existingController.stop();
+        await existingController.start();
+      } catch (e) {
+        console.warn('[TTS] audiobook word-seek restart failed:', e);
+      }
+    }
+  };
 
   // handleTTSSpeak / handleTTSStop (plain functions, registered once at mount via closure)
   const handleTTSSpeak = async (event: CustomEvent) => {

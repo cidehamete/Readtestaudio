@@ -224,9 +224,14 @@ export class AudiobookTTSClient implements TTSClient {
 
     const wordNorms = words.map((w) => norm(w.word));
     const totalDuration = words[words.length - 1]?.end ?? 0;
+    // Average seconds per word — used for extrapolating unmatched sentences.
+    const avgWordDuration = words.length > 0 ? totalDuration / words.length : 0.35;
 
     let searchStartIdx = startIdx;
     const startTimes: number[] = [];
+
+    // Word count per mark — used for word-rate extrapolation on fallback.
+    const markWordCounts = marks.map((m) => m.text.trim().split(/\s+/).length);
 
     for (let mi = 0; mi < marks.length; mi++) {
       const mark = marks[mi]!;
@@ -287,8 +292,21 @@ export class AudiobookTTSClient implements TTSClient {
       }
 
       if (!found) {
-        // Proportional fallback
-        startTimes.push((mi / marks.length) * totalDuration);
+        // Fallback: extrapolate from the previous mark's start + its word count
+        // times the average word duration. Keeps times anchored near the
+        // current audio position rather than jumping back to chapter start.
+        const prevStart =
+          startTimes[mi - 1] ?? words[searchStartIdx]?.start ?? words[startIdx]?.start ?? 0;
+        const prevWordCount = mi > 0 ? markWordCounts[mi - 1]! : 0;
+        startTimes.push(prevStart + prevWordCount * avgWordDuration);
+      }
+    }
+
+    // Enforce monotonic non-decreasing start times so later sentences never
+    // resolve to a time before an earlier one (prevents "past-time" rushes).
+    for (let i = 1; i < startTimes.length; i++) {
+      if (startTimes[i]! < startTimes[i - 1]!) {
+        startTimes[i] = startTimes[i - 1]! + avgWordDuration;
       }
     }
 
@@ -453,7 +471,10 @@ export class AudiobookTTSClient implements TTSClient {
     // Preload the next chapter in the background
     this.#preloadNextChapter(chapter.index);
 
-    const audioStartIdx = this.#wordIndexAtTime(timestamps.words, this.#audioEl.currentTime);
+    // Seed search index with a 2s backward tolerance so a sentence that
+    // started just before the current audio time can still be matched.
+    const searchSeedTime = Math.max(0, this.#audioEl.currentTime - 2.0);
+    const audioStartIdx = this.#wordIndexAtTime(timestamps.words, searchSeedTime);
     const sentenceStartTimes = this.#buildSentenceStartTimes(
       timestamps.words,
       marks,

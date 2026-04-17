@@ -15,14 +15,23 @@ import { TTSGranularity, TTSVoice, TTSVoicesGroup } from './types';
 import { TTSController } from './TTSController';
 import { parseSSMLMarks } from '@/utils/ssml';
 
-// Drift threshold: if audio position deviates more than this from expected, seek to correct.
-const SEEK_DRIFT_THRESHOLD_SEC = 2.0;
-
-// Pacing cushion: hold each page slightly longer than the chapter-average
-// word rate predicts. Pages pre-estimated at 15 s actually take ~17–18 s
-// (pauses, punctuation, phrasing), so a ~18 % cushion keeps the text from
-// running ahead of the narrator.
+// Pacing cushion for the proportional-pacing fallback used when a mark's
+// text cannot be matched against the word-level timestamps. Pages pre-
+// estimated from chapter-average word rate tend to run slightly fast, so
+// a small cushion keeps the text from visually running ahead of the
+// narrator on unmatchable blocks.
 const PAGE_PACING_FACTOR = 1.18;
+
+// How many words of slack to apply when positioning the fuzzy search
+// cursor. Lets us tolerate small skew between the current audio time and
+// the true position of the next matched mark.
+const FUZZY_SEARCH_LOOKBACK_WORDS = 8;
+
+// When matching a mark's keywords, allow up to this many transcript words
+// in between adjacent keywords before giving up on the match. This
+// handles common short filler words (pronouns, articles, prepositions)
+// that the normal keyword filter already strips from the query.
+const FUZZY_MAX_GAP_BETWEEN_KEYWORDS = 3;
 
 // ─── Manifest types (matching audiobook-maker's generator.py output) ──────────
 
@@ -224,64 +233,92 @@ export class AudiobookTTSClient implements TTSClient {
         .trim();
 
     const wordNorms = timestamps.words.map((w) => norm(w.word));
+    const totalWords = timestamps.words.length;
+    const chapterEndTime = timestamps.words[totalWords - 1]?.end ?? 0;
 
     // Find the first word at or after pageStartAudioTime, then step back a few
     // words to allow for minor timing imprecision in the audio element.
     let searchPos = timestamps.words.findIndex((w) => w.start >= pageStartAudioTime);
-    if (searchPos < 0) searchPos = timestamps.words.length;
-    searchPos = Math.max(0, searchPos - 5);
+    if (searchPos < 0) searchPos = totalWords;
+    searchPos = Math.max(0, searchPos - FUZZY_SEARCH_LOOKBACK_WORDS);
 
-    // Fallback rate used when fuzzy matching fails.
-    const totalDuration = timestamps.words[timestamps.words.length - 1]?.end ?? 0;
+    // Fallback rate used when fuzzy matching fails. Scaled by the pacing
+    // cushion so unmatched marks advance slightly slower than average to
+    // avoid running ahead of the narrator.
     const fallbackSpw =
-      totalDuration > 0 && timestamps.words.length > 0
-        ? (totalDuration / timestamps.words.length) * PAGE_PACING_FACTOR
+      chapterEndTime > 0 && totalWords > 0
+        ? (chapterEndTime / totalWords) * PAGE_PACING_FACTOR
         : 0.35 * PAGE_PACING_FACTOR;
 
     const startTimes: number[] = [];
     const endTimes: number[] = [];
 
     for (const mark of marks) {
-      // Extract up to 4 non-trivial keywords from the mark text for matching.
+      // Extract up to 5 content keywords from the mark text. Filter out
+      // short words (≤2 chars like "I", "am", "a", "it") whose text is
+      // noisy to match against; they appear in almost every sentence.
       const keyWords = norm(mark.text)
         .split(/\s+/)
         .filter((w) => w.length > 2)
-        .slice(0, 4);
+        .slice(0, 5);
 
-      let matched = false;
+      let matchStart = -1;
+      let matchEnd = -1;
 
-      if (keyWords.length >= 2 && searchPos < timestamps.words.length) {
-        const limit = timestamps.words.length - keyWords.length;
-        for (let i = searchPos; i <= limit; i++) {
-          let ok = true;
-          for (let ki = 0; ki < keyWords.length; ki++) {
-            if (!wordNorms[i + ki]?.includes(keyWords[ki]!)) {
-              ok = false;
-              break;
+      if (keyWords.length >= 2 && searchPos < totalWords) {
+        const windowLimit = totalWords - 1;
+        outer: for (let i = searchPos; i <= windowLimit; i++) {
+          if (!wordNorms[i]?.includes(keyWords[0]!)) continue;
+          // Anchored on keyWords[0]; greedily find each subsequent keyword
+          // within FUZZY_MAX_GAP_BETWEEN_KEYWORDS of the previous one.
+          let cursor = i;
+          let last = i;
+          for (let ki = 1; ki < keyWords.length; ki++) {
+            const searchStart = last + 1;
+            const searchLimit = Math.min(last + 1 + FUZZY_MAX_GAP_BETWEEN_KEYWORDS, totalWords - 1);
+            let found = -1;
+            for (let j = searchStart; j <= searchLimit; j++) {
+              if (wordNorms[j]?.includes(keyWords[ki]!)) {
+                found = j;
+                break;
+              }
             }
+            if (found < 0) {
+              // Anchor failed — advance outer loop to look for the next
+              // occurrence of keyWords[0].
+              continue outer;
+            }
+            cursor = found;
+            last = found;
           }
-          if (ok) {
-            const tStart = timestamps.words[i]!.start;
-            const markWordCount = mark.text.trim().split(/\s+/).length;
-            const lastWordIdx = Math.min(i + markWordCount - 1, timestamps.words.length - 1);
-            const tEnd = timestamps.words[lastWordIdx]!.end;
-            // Clamp to pageStartAudioTime: marks before the current audio
-            // position fire immediately rather than being skipped.
-            startTimes.push(Math.max(pageStartAudioTime, tStart));
-            endTimes.push(Math.max(pageStartAudioTime, tEnd));
-            searchPos = i + 1; // advance cursor so next mark searches forward
-            matched = true;
-            break;
-          }
+          // All keywords found within gap tolerance. Use the first
+          // keyword's word index as the start, and the last keyword's
+          // word end as the end.
+          matchStart = i;
+          matchEnd = cursor;
+          break;
         }
       }
 
-      if (!matched) {
-        // Fallback: pace proportionally from the last known position.
+      if (matchStart >= 0) {
+        const tStart = timestamps.words[matchStart]!.start;
+        const tEnd = timestamps.words[matchEnd]!.end;
+        // Clamp to pageStartAudioTime so marks earlier than the audio
+        // position fire immediately rather than being skipped.
+        startTimes.push(Math.max(pageStartAudioTime, tStart));
+        endTimes.push(Math.max(pageStartAudioTime, tEnd));
+        searchPos = matchEnd + 1; // advance so next mark searches forward
+      } else {
+        // Proportional fallback: pace from the previous end time. Cap to
+        // chapter end so a long tail of unmatchable marks never
+        // extrapolates past the audio content, which would make speak()
+        // block forever waiting for a time the audio will never reach.
         const prevEnd = endTimes.length > 0 ? endTimes[endTimes.length - 1]! : pageStartAudioTime;
         const markWords = Math.max(1, mark.text.trim().split(/\s+/).length);
-        startTimes.push(prevEnd);
-        endTimes.push(prevEnd + markWords * fallbackSpw);
+        const start = Math.min(prevEnd, chapterEndTime || prevEnd);
+        const end = Math.min(prevEnd + markWords * fallbackSpw, chapterEndTime || prevEnd);
+        startTimes.push(start);
+        endTimes.push(end);
       }
     }
 
@@ -513,18 +550,52 @@ export class AudiobookTTSClient implements TTSClient {
     // Preload the next chapter in the background
     this.#preloadNextChapter(chapter.index);
 
+    const pageStartAudioTime = this.#audioEl.currentTime;
+    const chapterEndTime = timestamps.words[timestamps.words.length - 1]!.end;
+
+    // Audio-past-chapter fast-path: if the audio has already advanced past
+    // the last word of the chapter (e.g. because a previous block's marks
+    // fell through to proportional pacing and the reader is still catching
+    // up), dispatch this block's marks in rapid succession and yield 'end'
+    // so the reader advances until it matches the audio. Avoids speak()
+    // hanging on a target time the audio will never reach.
+    if (pageStartAudioTime >= chapterEndTime && chapterEndTime > 0) {
+      console.info(
+        `[AudiobookTTSClient] audio past chapter end (t=${pageStartAudioTime.toFixed(2)} ≥ ` +
+          `chapterEnd=${chapterEndTime.toFixed(2)}) — rapid-dispatch ${marks.length} marks`,
+      );
+      try {
+        await this.#audioEl.play();
+      } catch {
+        // Safe to ignore — we're just catching the reader up.
+      }
+      for (const mark of marks) {
+        if (signal.aborted) break;
+        this.controller?.dispatchSpeakMark(mark);
+        yield { code: 'boundary', mark: mark.name } as TTSMessageEvent;
+      }
+      if (signal.aborted) {
+        yield { code: 'error', message: 'Aborted' } as TTSMessageEvent;
+        return;
+      }
+      yield { code: 'end' } as TTSMessageEvent;
+      return;
+    }
+
     // Match each mark to its actual word-level timestamp, anchored to the
     // current audio position. Re-anchoring at every page turn self-corrects
     // any accumulated drift. Falls back to proportional pacing for marks
     // whose text cannot be matched against the timestamp word list.
-    const pageStartAudioTime = this.#audioEl.currentTime;
-    const { startTimes: sentenceStartTimes, endTimes: sentenceEndTimes } =
-      this.#matchMarksToTimestamps(marks, timestamps, pageStartAudioTime);
+    const { startTimes: sentenceStartTimes } = this.#matchMarksToTimestamps(
+      marks,
+      timestamps,
+      pageStartAudioTime,
+    );
 
     console.info(
       `[AudiobookTTSClient] speak: chapter=${chapter.index} chapterChanged=${chapterChanged} ` +
         `audioT=${pageStartAudioTime.toFixed(2)} marks=${marks.length} ` +
-        `pageDur=${(sentenceEndTimes[sentenceEndTimes.length - 1]! - pageStartAudioTime).toFixed(2)}s`,
+        `lastMarkAt=${sentenceStartTimes[sentenceStartTimes.length - 1]?.toFixed(2)}`,
     );
 
     try {
@@ -536,47 +607,32 @@ export class AudiobookTTSClient implements TTSClient {
     }
 
     // Dispatch each mark when audio reaches its estimated start time.
+    //
+    // Key invariants of the new sync model:
+    //   1. Audio is the single source of truth — we NEVER seek it forward
+    //      at a block boundary. Doing so would skip unheard narration.
+    //   2. If the audio has already passed a mark's start time (because the
+    //      reader is catching up to the narrator), dispatch it immediately.
+    //   3. We do NOT wait for the last sentence's *end* time before yielding
+    //      'end'. The audio keeps playing continuously between blocks; the
+    //      next block's first mark will naturally wait for the audio to
+    //      arrive at its true position. Removing the end-wait eliminates
+    //      the hang that occurred when proportional-pacing estimates
+    //      extrapolated past the chapter content.
     for (let i = 0; i < marks.length; i++) {
       if (signal.aborted) break;
 
       const mark = marks[i]!;
       const sentenceStart = sentenceStartTimes[i] ?? this.#audioEl.currentTime;
 
-      // Only seek forward if audio has fallen significantly behind.
-      // Never seek backwards (would skip already-played content).
-      if (this.#audioEl.currentTime < sentenceStart - SEEK_DRIFT_THRESHOLD_SEC) {
-        console.info(
-          `[AudiobookTTSClient] seek: ${this.#audioEl.currentTime.toFixed(2)} → ${sentenceStart.toFixed(2)}`,
-        );
-        this.#audioEl.currentTime = sentenceStart;
+      if (this.#audioEl.currentTime < sentenceStart) {
+        await this.#waitUntilTime(sentenceStart, signal);
       }
-
-      // Wait until audio reaches this sentence's start
-      await this.#waitUntilTime(sentenceStart, signal);
 
       if (signal.aborted) break;
-      if (this.#audioEl.ended) {
-        // Chapter ended mid-page — dispatch remaining marks rapidly
-        // so the reader still advances to the chapter end.
-        this.controller?.dispatchSpeakMark(mark);
-        yield { code: 'boundary', mark: mark.name } as TTSMessageEvent;
-        continue;
-      }
 
       this.controller?.dispatchSpeakMark(mark);
       yield { code: 'boundary', mark: mark.name } as TTSMessageEvent;
-    }
-
-    // Wait for the end-time of this page's LAST sentence (computed from
-    // real word-level timestamps when matched). This prevents yielding
-    // 'end' before the audio has finished speaking the block, AND prevents
-    // overshooting into the next block — which would make the next block's
-    // marks all resolve instantly and the reader would skip a paragraph.
-    if (!signal.aborted) {
-      const pageEndAudioTime = sentenceEndTimes[sentenceEndTimes.length - 1] ?? pageStartAudioTime;
-      if (!this.#audioEl.ended && this.#audioEl.currentTime < pageEndAudioTime) {
-        await this.#waitUntilTime(pageEndAudioTime, signal);
-      }
     }
 
     if (signal.aborted) {

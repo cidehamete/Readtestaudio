@@ -37,9 +37,7 @@ const TTSControl: React.FC<TTSControlProps> = ({ bookKey, gridInsets }) => {
   const [trianglePosition, setTrianglePosition] = useState<Position>();
 
   const iconRef = useRef<HTMLDivElement>(null);
-  const hoverTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const backButtonTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const [showIndicatorWithinTimeout, setShowIndicatorWithinTimeout] = useState(true);
 
   const [shouldMountBackButton, setShouldMountBackButton] = useState(false);
   const [isBackButtonVisible, setIsBackButtonVisible] = useState(false);
@@ -90,34 +88,6 @@ const TTSControl: React.FC<TTSControlProps> = ({ bookKey, gridInsets }) => {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [showPanel]);
-
-  useEffect(() => {
-    if (hoveredBookKey) {
-      if (hoverTimeoutRef.current) {
-        clearTimeout(hoverTimeoutRef.current);
-        hoverTimeoutRef.current = null;
-      }
-      const showTimeout = setTimeout(() => {
-        setShowIndicatorWithinTimeout(true);
-      }, 100);
-      hoverTimeoutRef.current = showTimeout;
-    } else {
-      if (hoverTimeoutRef.current) {
-        clearTimeout(hoverTimeoutRef.current);
-        hoverTimeoutRef.current = null;
-      }
-      const hideTimeout = setTimeout(() => {
-        setShowIndicatorWithinTimeout(false);
-      }, 5000);
-      hoverTimeoutRef.current = hideTimeout;
-    }
-
-    return () => {
-      if (hoverTimeoutRef.current) {
-        clearTimeout(hoverTimeoutRef.current);
-      }
-    };
-  }, [hoveredBookKey]);
 
   useEffect(() => {
     if (tts.showTTSBar) {
@@ -188,11 +158,17 @@ const TTSControl: React.FC<TTSControlProps> = ({ bookKey, gridInsets }) => {
         </div>
       )}
       {showPanel && <Overlay onDismiss={handleDismissPopup} />}
-      {(showPanel || (tts.showIndicator && showIndicatorWithinTimeout)) && (
+      {/*
+       * Persistent floating TTS / audiobook trigger. Always rendered once
+       * TTS clients have initialized — no hover gating, no auto-hide — so
+       * users (especially on touch devices where hover is an awkward
+       * proxy) can start or re-open the audio panel at any time.
+       */}
+      {tts.ttsClientsInited && (
         <div
           ref={iconRef}
           className={clsx(
-            'absolute h-12 w-12',
+            'absolute z-40 h-12 w-12',
             'transition-transform duration-300',
             viewSettings?.rtl ? 'left-8' : 'right-6',
             !appService?.hasSafeAreaInset && 'bottom-[70px] sm:bottom-14',

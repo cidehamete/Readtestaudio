@@ -57,6 +57,9 @@ export const useTTSControl = ({ bookKey, onRequestHidePanel }: UseTTSControlProp
   const previousSectionLabelRef = useRef<string | undefined>(undefined);
   const ttsControllerRef = useRef<TTSController | null>(null);
   const isStartingTTSRef = useRef(false);
+  // Debounce audiobook word-seeks: ignore events within 1.5 s of the last one
+  // to prevent rapid selectionchange firings from jumping to the wrong position.
+  const lastAudiobookSeekTimeRef = useRef(0);
   const [ttsController, setTtsController] = useState<TTSController | null>(null);
   const [ttsClientsInited, setTtsClientsInitialized] = useState(false);
 
@@ -462,6 +465,12 @@ export const useTTSControl = ({ bookKey, onRequestHidePanel }: UseTTSControlProp
   // Fired by useLongPressEvent when the user long-presses a text word while
   // an audiobook is playing. No-op if TTS is not active or not an audiobook.
   const handleTTSAudiobookSeek = async (event: CustomEvent) => {
+    // Debounce: selectionchange can fire multiple times as iOS expands the
+    // selection. Ignore any seek that arrives within 1.5 s of the last one.
+    const now = Date.now();
+    if (now - lastAudiobookSeekTimeRef.current < 1500) return;
+    lastAudiobookSeekTimeRef.current = now;
+
     const { bookKey: ttsBookKey, seekText } = event.detail as {
       bookKey: string;
       seekText: string;

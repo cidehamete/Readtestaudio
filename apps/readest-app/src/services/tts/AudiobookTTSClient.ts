@@ -196,181 +196,99 @@ export class AudiobookTTSClient implements TTSClient {
     }
   }
 
-  // ── Mark timing ───────────────────────────────────────────────────────────────
+  // ── Page pacing ──────────────────────────────────────────────────────────────
 
   /**
-   * Match EPUB paragraph marks to the chapter's word-level timestamps using a
-   * forward-only fuzzy search, then fill any gaps via proportional interpolation.
+   * Pace each mark proportionally by word count against a chapter-wide
+   * seconds-per-word rate, anchored to the audio's current position at the
+   * start of this page.
    *
-   * Why not pure pacing (the old approach):
-   *   Word-rate averaging drifts across a chapter — pauses, emphasis, and
-   *   punctuation make some paragraphs take 40 % longer than the average,
-   *   so the highlighted paragraph falls out of sync with the narrator.
-   *
-   * Strategy:
-   *  1. Extract the first 2–3 significant (non-stop, length ≥ 3) words from
-   *     each mark and search forward through the timestamp word list.
-   *  2. When a match is found, record the word's actual `start` time and
-   *     advance the search cursor past it (no backtracking).
-   *  3. Seed the cursor to the timestamp index closest to `pageStartAudioTime`
-   *     so we don't scan the whole chapter on every page.
-   *  4. After matching, interpolate proportionally between consecutive known
-   *     anchors (page-start → matched marks → estimated page-end).
-   *  5. If few/no matches are found, the interpolation degrades gracefully to
-   *     the same word-rate estimate used previously.
+   * Re-anchoring at every page (pageStartAudioTime = audio.currentTime) means
+   * any accumulated drift is automatically corrected on each page turn.
    */
-  #matchMarksToTimestamps(
-    marks: { text: string }[],
-    words: AudiobookWord[],
-    pageStartAudioTime: number,
+  #paceMarks(
     totalChapterDuration: number,
+    totalChapterWords: number,
+    marks: { text: string }[],
+    pageStartAudioTime: number,
   ): { startTimes: number[]; endTimes: number[] } {
-    if (marks.length === 0) return { startTimes: [], endTimes: [] };
+    const baseSecondsPerWord =
+      totalChapterWords > 0 && totalChapterDuration > 0
+        ? totalChapterDuration / totalChapterWords
+        : 0.35;
+    // Cushion the rate so pages hold slightly longer than the raw average
+    // predicts (pauses, punctuation, and phrasing add ~18 % real time).
+    const secondsPerWord = baseSecondsPerWord * PAGE_PACING_FACTOR;
 
-    // ── Word-rate fallback (used for interpolation gaps) ───────────────────
-    const baseSecPerWord =
-      words.length > 0 && totalChapterDuration > 0
-        ? (totalChapterDuration / words.length) * PAGE_PACING_FACTOR
-        : 0.35 * PAGE_PACING_FACTOR;
-    const totalPageWords = marks.reduce(
-      (s, m) => s + Math.max(1, m.text.trim().split(/\s+/).length),
-      0,
-    );
-    const estimatedPageEnd = pageStartAudioTime + totalPageWords * baseSecPerWord;
+    const startTimes: number[] = [];
+    const endTimes: number[] = [];
+    let cursor = pageStartAudioTime;
 
-    // ── Fuzzy forward-search against word timestamps ───────────────────────
-    const MATCH_WINDOW = 200; // max words to look ahead per mark
-    const KEY_WORD_COUNT = 3; // significant words to match
-    const MIN_KEY_LEN = 3; // minimum key-word length
-    const STOP_WORDS = new Set([
-      'the',
-      'and',
-      'for',
-      'that',
-      'was',
-      'are',
-      'not',
-      'but',
-      'had',
-      'his',
-      'her',
-      'she',
-      'they',
-      'with',
-      'have',
-      'this',
-      'from',
-      'all',
-      'were',
-      'been',
-      'one',
-      'out',
-      'what',
-      'its',
-      'when',
-      'who',
-      'into',
-      'you',
-      'him',
-      'would',
-      'said',
-      'there',
-      'their',
-      'will',
-      'could',
-      'them',
-    ]);
-
-    const normWord = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
-    const keyWordsOf = (text: string): string[] =>
-      text
-        .toLowerCase()
-        .replace(/[^a-z0-9\s]/g, ' ')
-        .split(/\s+/)
-        .map(normWord)
-        .filter((w) => w.length >= MIN_KEY_LEN && !STOP_WORDS.has(w))
-        .slice(0, KEY_WORD_COUNT);
-
-    const wordNorms = words.map((w) => normWord(w.word));
-
-    // Seed the search cursor to the word index nearest to pageStartAudioTime
-    // (with a small lookback so we don't miss the first mark).
-    let searchPos = 0;
-    for (let i = 0; i < words.length; i++) {
-      if ((words[i]?.start ?? 0) >= pageStartAudioTime - 1) {
-        searchPos = Math.max(0, i - 10);
-        break;
-      }
+    for (const mark of marks) {
+      const markWords = Math.max(1, mark.text.trim().split(/\s+/).length);
+      const duration = markWords * secondsPerWord;
+      startTimes.push(cursor);
+      cursor += duration;
+      endTimes.push(cursor);
     }
 
-    const matchedStarts: (number | null)[] = new Array(marks.length).fill(null);
-    for (let mi = 0; mi < marks.length; mi++) {
-      const keys = keyWordsOf(marks[mi]!.text);
-      if (keys.length === 0) continue;
-      const limit = Math.min(searchPos + MATCH_WINDOW, wordNorms.length - keys.length);
-      for (let wi = searchPos; wi <= limit; wi++) {
-        let ok = true;
-        for (let ki = 0; ki < keys.length; ki++) {
-          if (wordNorms[wi + ki] !== keys[ki]) {
-            ok = false;
-            break;
-          }
-        }
-        if (ok) {
-          matchedStarts[mi] = words[wi]!.start;
-          searchPos = wi + keys.length;
+    return { startTimes, endTimes };
+  }
+
+  // ── Chapter-start seek ────────────────────────────────────────────────────────
+
+  /**
+   * When a chapter first loads with no saved position (savedPos === 0), the
+   * audio would start at t=0 while the reader might be deep into that chapter.
+   * This method seeks the audio to the position corresponding to the first
+   * mark on the current page, so narration starts where the reader is.
+   *
+   * Uses the same fuzzy matching logic as seekToText but against the
+   * already-loaded timestamps and always picks the earliest match.
+   */
+  async #seekToPageStart(
+    firstMarkText: string,
+    timestamps: AudiobookChapterTimestamps,
+  ): Promise<void> {
+    if (!this.#audioEl || !firstMarkText.trim()) return;
+
+    const norm = (s: string) =>
+      s
+        .toLowerCase()
+        .replace(/[^a-z0-9]/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+
+    const keyWords = norm(firstMarkText)
+      .split(/\s+/)
+      .filter((w) => w.length > 2)
+      .slice(0, 5);
+    if (keyWords.length === 0) return;
+
+    const wordNorms = timestamps.words.map((w) => norm(w.word));
+    const limit = timestamps.words.length - keyWords.length;
+
+    for (let i = 0; i <= limit; i++) {
+      let ok = true;
+      for (let ki = 0; ki < keyWords.length; ki++) {
+        if (!wordNorms[i + ki]?.includes(keyWords[ki]!)) {
+          ok = false;
           break;
         }
       }
-    }
-
-    // ── Build start times by interpolating between match anchors ──────────
-    const startTimes: number[] = new Array(marks.length).fill(0);
-
-    // Anchor list: (markIndex, audioTime)
-    //   idx -1            = page start
-    //   idx marks.length  = estimated page end
-    const anchors: Array<{ idx: number; time: number }> = [
-      { idx: -1, time: pageStartAudioTime },
-      ...matchedStarts.map((t, i) => ({ idx: i, time: t! })).filter((p) => p.time !== null),
-      { idx: marks.length, time: estimatedPageEnd },
-    ];
-
-    for (let ai = 0; ai < anchors.length - 1; ai++) {
-      const a = anchors[ai]!;
-      const b = anchors[ai + 1]!;
-
-      // Record the matched anchor's start time
-      if (b.idx >= 0 && b.idx < marks.length && matchedStarts[b.idx] !== null) {
-        startTimes[b.idx] = b.time;
-      }
-
-      // Interpolate proportionally across any unmatched gap between a and b
-      const gapStart = a.idx + 1;
-      const gapEnd = b.idx - 1;
-      if (gapStart > gapEnd) continue;
-
-      const spanDuration = b.time - a.time;
-      const gapMarks = marks.slice(gapStart, gapEnd + 1);
-      const totalW = gapMarks.reduce(
-        (s, m) => s + Math.max(1, m.text.trim().split(/\s+/).length),
-        0,
-      );
-      const spw = totalW > 0 ? spanDuration / totalW : baseSecPerWord;
-
-      let cursor = a.time;
-      for (let i = gapStart; i <= gapEnd; i++) {
-        startTimes[i] = cursor;
-        cursor += Math.max(1, marks[i]!.text.trim().split(/\s+/).length) * spw;
+      if (ok) {
+        const targetTime = timestamps.words[i]!.start;
+        console.info(
+          `[AudiobookTTSClient] chapter start seek: "${firstMarkText.slice(0, 40)}" → ${targetTime.toFixed(2)}s`,
+        );
+        this.#audioEl.currentTime = targetTime;
+        return;
       }
     }
 
-    // End time = next mark's start; last mark gets the estimated page end
-    const endTimes = startTimes.map((_t, i) =>
-      i < marks.length - 1 ? startTimes[i + 1]! : estimatedPageEnd,
+    console.info(
+      `[AudiobookTTSClient] chapter start seek: no match for "${firstMarkText.slice(0, 40)}" — starting from 0`,
     );
-
-    return { startTimes, endTimes };
   }
 
   // ── Preload helpers ───────────────────────────────────────────────────────────
@@ -531,24 +449,27 @@ export class AudiobookTTSClient implements TTSClient {
       const savedPos = this.#loadPosition(chapter.index);
       if (savedPos > 0) {
         this.#audioEl.currentTime = savedPos;
+      } else if (marks.length > 0) {
+        // No saved position — seek to the first mark's text so the audio
+        // starts at the current page rather than from the chapter beginning.
+        const firstMarkText = marks[0]!.text.trim().split(/\s+/).slice(0, 6).join(' ');
+        await this.#seekToPageStart(firstMarkText, timestamps);
       }
     }
 
     // Preload the next chapter in the background
     this.#preloadNextChapter(chapter.index);
 
-    // Match each mark to its actual word-timestamp position so the highlighted
-    // paragraph tracks the narrator accurately. Falls back to proportional
-    // interpolation for paragraphs whose text doesn't match the audio transcript.
+    // Pace each mark by word count anchored to the current audio position.
+    // Re-anchoring at every page turn self-corrects any accumulated drift.
     const pageStartAudioTime = this.#audioEl.currentTime;
     const totalChapterDuration = timestamps.words[timestamps.words.length - 1]?.end ?? 0;
-    const { startTimes: sentenceStartTimes, endTimes: sentenceEndTimes } =
-      this.#matchMarksToTimestamps(
-        marks,
-        timestamps.words,
-        pageStartAudioTime,
-        totalChapterDuration,
-      );
+    const { startTimes: sentenceStartTimes, endTimes: sentenceEndTimes } = this.#paceMarks(
+      totalChapterDuration,
+      timestamps.words.length,
+      marks,
+      pageStartAudioTime,
+    );
 
     console.info(
       `[AudiobookTTSClient] speak: chapter=${chapter.index} chapterChanged=${chapterChanged} ` +

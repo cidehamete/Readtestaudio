@@ -18,6 +18,12 @@ import { parseSSMLMarks } from '@/utils/ssml';
 // Drift threshold: if audio position deviates more than this from expected, seek to correct.
 const SEEK_DRIFT_THRESHOLD_SEC = 2.0;
 
+// Pacing cushion: hold each page slightly longer than the chapter-average
+// word rate predicts. Pages pre-estimated at 15 s actually take ~17–18 s
+// (pauses, punctuation, phrasing), so a ~18 % cushion keeps the text from
+// running ahead of the narrator.
+const PAGE_PACING_FACTOR = 1.18;
+
 // ─── Manifest types (matching audiobook-maker's generator.py output) ──────────
 
 interface AudiobookWord {
@@ -212,10 +218,12 @@ export class AudiobookTTSClient implements TTSClient {
     marks: { text: string }[],
     pageStartAudioTime: number,
   ): { startTimes: number[]; endTimes: number[] } {
-    const secondsPerWord =
+    const baseSecondsPerWord =
       totalChapterWords > 0 && totalChapterDuration > 0
         ? totalChapterDuration / totalChapterWords
         : 0.35;
+    // Cushion the rate so pages hold a bit longer than the raw avg predicts.
+    const secondsPerWord = baseSecondsPerWord * PAGE_PACING_FACTOR;
 
     const startTimes: number[] = [];
     const endTimes: number[] = [];
@@ -530,6 +538,72 @@ export class AudiobookTTSClient implements TTSClient {
     if (this.#audioEl) {
       this.#audioEl.currentTime = Math.max(0, Math.min(this.#audioEl.duration || 0, seconds));
     }
+  }
+
+  /**
+   * Search the current chapter's word timestamps for the given text and seek
+   * audio to the matched position. Used when the user selects a word/passage
+   * and taps the headphones icon — a "re-orient the narrator" control.
+   *
+   * Picks the match closest to the current audio position so both rewind and
+   * fast-forward work naturally. Returns true if a match was found.
+   */
+  async seekToText(text: string): Promise<boolean> {
+    if (!this.#manifest || !this.#audioEl || this.#currentChapterIndex < 0) return false;
+    const chapter = this.#manifest.chapters.find((c) => c.index === this.#currentChapterIndex);
+    if (!chapter) return false;
+    const timestamps = await this.#loadTimestamps(chapter.timestamps_url);
+    if (!timestamps || timestamps.words.length === 0) return false;
+
+    const norm = (s: string) =>
+      s
+        .toLowerCase()
+        .replace(/[^a-z0-9]/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+
+    const keyWords = norm(text)
+      .split(/\s+/)
+      .filter((w) => w.length > 1)
+      .slice(0, 4);
+    if (keyWords.length === 0) return false;
+
+    const wordNorms = timestamps.words.map((w) => norm(w.word));
+    const limit = timestamps.words.length - keyWords.length;
+    const matches: number[] = [];
+    for (let i = 0; i <= limit; i++) {
+      let ok = true;
+      for (let j = 0; j < keyWords.length; j++) {
+        if (!wordNorms[i + j]?.includes(keyWords[j]!)) {
+          ok = false;
+          break;
+        }
+      }
+      if (ok) matches.push(i);
+    }
+
+    if (matches.length === 0) {
+      console.info(`[AudiobookTTSClient] seekToText: no match for "${text.slice(0, 40)}"`);
+      return false;
+    }
+
+    // Pick the match closest to the current audio position
+    const now = this.#audioEl.currentTime;
+    let best = matches[0]!;
+    let bestDist = Math.abs((timestamps.words[best]?.start ?? 0) - now);
+    for (const m of matches) {
+      const d = Math.abs((timestamps.words[m]?.start ?? 0) - now);
+      if (d < bestDist) {
+        best = m;
+        bestDist = d;
+      }
+    }
+    const targetTime = timestamps.words[best]!.start;
+    console.info(
+      `[AudiobookTTSClient] seekToText: "${text.slice(0, 40)}" → ${targetTime.toFixed(2)}s`,
+    );
+    this.#audioEl.currentTime = targetTime;
+    return true;
   }
 
   // ── Settings ─────────────────────────────────────────────────────────────────

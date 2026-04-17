@@ -460,6 +460,34 @@ export const useTTSControl = ({ bookKey, onRequestHidePanel }: UseTTSControlProp
   const handleTTSSpeak = async (event: CustomEvent) => {
     const { bookKey: ttsBookKey, range, index, oneTime = false } = event.detail;
     if (bookKey !== ttsBookKey) return;
+
+    // Audiobook re-orient: if audiobook TTS is already running and the user
+    // selected text, seek the audio to that text's position instead of
+    // tearing down and recreating the controller. This lets the user use
+    // the headphones icon on a selection as a "jump narrator here" control.
+    const existingController = ttsControllerRef.current;
+    if (existingController?.ttsAudiobookClient?.initialized && range && !oneTime) {
+      const selectedText = (range as Range).toString().trim();
+      if (selectedText) {
+        const seeked = await existingController.ttsAudiobookClient.seekToText(selectedText);
+        if (seeked) {
+          const view = getView(bookKey);
+          try {
+            await existingController.stop();
+            const ssml = view?.tts?.from(range as Range);
+            if (ssml) {
+              existingController.speak(ssml);
+            } else {
+              await existingController.start();
+            }
+          } catch (e) {
+            console.warn('[TTS] audiobook seek restart failed:', e);
+          }
+          return;
+        }
+      }
+    }
+
     // Guard against concurrent starts (e.g. rapid double-clicks on the TTS
     // icon). Without this, both invocations race past the `await`s below and
     // end up creating two TTSController instances that speak simultaneously.

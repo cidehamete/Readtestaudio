@@ -559,7 +559,8 @@ export const useTTSControl = ({ bookKey, onRequestHidePanel }: UseTTSControlProp
       try {
         const seeked = await existingController.ttsAudiobookClient.seekToText(seekText);
         if (seeked) {
-          await existingController.stop();
+          // pause (not stop) — see comment in the same-chapter path below.
+          await existingController.pause();
           await existingController.start();
         }
       } catch (e) {
@@ -572,7 +573,13 @@ export const useTTSControl = ({ bookKey, onRequestHidePanel }: UseTTSControlProp
     const seeked = await existingController.ttsAudiobookClient.seekToText(seekText);
     if (seeked) {
       try {
-        await existingController.stop();
+        // Use pause (not stop) so that start() sees a 'paused' state and
+        // routes to view.tts.resume() — which re-emits SSML for the CURRENT
+        // block. stop() leaves state='stopped', making start() call
+        // view.tts.start() which in foliate-js resets to the section's
+        // first block. The subsequent pre-dispatch of marks[0] would then
+        // scroll the view to chapter start, undoing the seek.
+        await existingController.pause();
         await existingController.start();
       } catch (e) {
         console.warn('[TTS] audiobook word-seek restart failed:', e);

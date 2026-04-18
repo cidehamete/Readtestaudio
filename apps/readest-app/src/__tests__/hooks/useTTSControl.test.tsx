@@ -406,4 +406,56 @@ describe('useTTSControl tts-audiobook-seek cross-chapter behavior', () => {
 
     vi.useRealTimers();
   });
+
+  // Regression: a successful same-chapter seekToText was followed by
+  // controller.stop() + controller.start(). Because stop() leaves state
+  // as 'stopped' (not containing 'paused'), start() routes to
+  // view.tts.start() — which in foliate-js resets the TTS cursor to the
+  // FIRST block of the section. The pre-dispatch of marks[0] then
+  // scrolls the view to chapter start, undoing the seek.
+  //
+  // Fix: use pause() instead of stop(). pause() sets state='paused',
+  // which makes start() route to view.tts.resume() — the current block.
+  it('uses pause (not stop) before start on same-chapter seek so view does not reset to chapter start', async () => {
+    render(<Harness />);
+    await act(async () => {
+      await startAndAwait();
+    });
+
+    const controller = ttsControllerInstances[0] as {
+      sectionIndex: number;
+      navigateToChapter: ReturnType<typeof vi.fn>;
+      stop: ReturnType<typeof vi.fn>;
+      pause: ReturnType<typeof vi.fn>;
+      start: ReturnType<typeof vi.fn>;
+    };
+    controller.sectionIndex = 2;
+    controller.stop.mockClear();
+    controller.pause.mockClear();
+    controller.start.mockClear();
+
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.setSystemTime(new Date('2030-01-01T00:00:00Z'));
+
+    await act(async () => {
+      await eventDispatcher.dispatch('tts-audiobook-seek', {
+        bookKey: 'book-1',
+        seekText: 'the cathedral stood silent',
+        sectionIndex: 2,
+      });
+    });
+
+    // Sanity: seek fired.
+    expect(mockAudiobookClient.seekToText).toHaveBeenCalledWith('the cathedral stood silent');
+    // Must NOT stop (that would route start() through view.tts.start() →
+    // chapter-beginning SSML → view snaps back to chapter start).
+    expect(controller.stop).not.toHaveBeenCalled();
+    // Must pause so start() sees a paused state and uses view.tts.resume().
+    expect(controller.pause).toHaveBeenCalled();
+    // And must restart so the speak iterator re-enters with current audio time,
+    // letting AudiobookTTSClient.speak()'s seek-align skip past-time marks.
+    expect(controller.start).toHaveBeenCalled();
+
+    vi.useRealTimers();
+  });
 });

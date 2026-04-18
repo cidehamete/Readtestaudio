@@ -619,7 +619,37 @@ export class AudiobookTTSClient implements TTSClient {
     //      arrive at its true position. Removing the end-wait eliminates
     //      the hang that occurred when proportional-pacing estimates
     //      extrapolated past the chapter content.
-    for (let i = 0; i < marks.length; i++) {
+    //
+    // Seek-alignment: after a user-initiated seek (e.g. long-press on a word
+    // later in the chapter) the audio jumps forward but speak() is handed an
+    // SSML payload starting at the top of the current block. Without
+    // correction, every mark whose sentenceStart < audioT would be dispatched
+    // back-to-back, and the audio-leader would race the reader's cursor
+    // through each intervening sentence. Skip ahead to the mark whose
+    // sentence window actually contains the current audio time.
+    let startIdx = 0;
+    {
+      const now = this.#audioEl.currentTime;
+      for (let i = 0; i < sentenceStartTimes.length; i++) {
+        const s = sentenceStartTimes[i];
+        if (s === undefined) continue;
+        const next = sentenceStartTimes[i + 1];
+        if (s <= now && (next === undefined || now < next)) {
+          startIdx = i;
+          break;
+        }
+        // If every known start time is in the future, the first waitUntilTime
+        // will block anyway — leaving startIdx=0 is correct.
+      }
+      if (startIdx > 0) {
+        console.info(
+          `[AudiobookTTSClient] seek-align: audioT=${now.toFixed(2)} → skipping ` +
+            `${startIdx} past-time mark${startIdx === 1 ? '' : 's'} (first dispatch at mark ${startIdx})`,
+        );
+      }
+    }
+
+    for (let i = startIdx; i < marks.length; i++) {
       if (signal.aborted) break;
 
       const mark = marks[i]!;

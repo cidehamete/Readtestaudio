@@ -359,4 +359,64 @@ describe('AudiobookTTSClient sync behavior', () => {
     // sentence. drainWithTimeout above is what enforces that.
     expect(dispatchSpy).toHaveBeenCalledTimes(1);
   }, 10_000);
+
+  // Regression: after a long-press seek in the same chapter, the view was
+  // racing wildly through every preceding sentence mark before settling at
+  // the tapped word. Root cause: speak() iterates marks from index 0; when
+  // audio.currentTime is already past the earlier marks' start times,
+  // waitUntilTime returns instantly for each and dispatchSpeakMark fires —
+  // the audio-leader scrolls the view through each dispatched mark.
+  //
+  // Fix: speak() must advance to the first mark whose sentence is actually
+  // "current" given audio.currentTime, and skip dispatching earlier marks.
+  test('skips past-time marks when audio has been seeked forward', async () => {
+    const ctl = makeController();
+    const dispatchSpy = ctl.dispatchSpeakMark as unknown as ReturnType<typeof vi.fn>;
+    const client = new AudiobookTTSClient(ctl, 'https://example.com/manifest.json');
+    await client.init();
+    const audio = lastAudio!;
+
+    // Prime chapter 1 so subsequent speak() calls use the normal mid-chapter path.
+    const abort1 = new AbortController();
+    await primeFirstBlock(client, audio, abort1.signal, SSML_SENTENCE_A);
+    abort1.abort();
+    dispatchSpy.mockClear();
+
+    // Simulate a successful seekToText that moved audio into sentence B
+    // (sentence B starts at t=9). Pretend the user tapped a word inside
+    // sentence B so audio now sits at t=12 — past sentence A entirely.
+    audio.setTimeSilently(12);
+
+    const abort2 = new AbortController();
+    const iter = client.speak(SSML_TWO_SENTENCES, abort2.signal)[Symbol.asyncIterator]();
+
+    // Drive the first .next() with audio still at 12 (NOT past chapter end).
+    // The async generator only starts executing when next() is called, so if
+    // we advance audio before that, speak() would see audio-past-chapter-end
+    // and hit the rapid-dispatch fast-path — masking the bug we're testing.
+    const first = await iter.next();
+    expect(first.done).toBe(false);
+
+    // ✗ Buggy behavior: mark "0" (sentence A) is dispatched first because
+    //   the iterator started at index 0 and all preceding marks fire.
+    // ✓ Correct behavior: the first yielded boundary corresponds to mark "1"
+    //   because earlier past-time marks are skipped.
+    expect(dispatchSpy).toHaveBeenCalledTimes(1);
+    const firstMark = dispatchSpy.mock.calls[0]![0] as { name: string };
+    expect(firstMark.name).toBe('1');
+
+    // Advance audio past the block so the iterator terminates with 'end'.
+    audio.advanceTo(25);
+    const remainingCodes: string[] = [];
+    for (;;) {
+      const r = await iter.next();
+      if (r.done) break;
+      remainingCodes.push(r.value.code);
+      if (r.value.code === 'end') break;
+    }
+    expect(remainingCodes.at(-1)).toBe('end');
+
+    // Still exactly one mark dispatched across the whole speak().
+    expect(dispatchSpy).toHaveBeenCalledTimes(1);
+  }, 10_000);
 });

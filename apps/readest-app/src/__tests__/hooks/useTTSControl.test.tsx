@@ -19,7 +19,7 @@ vi.mock('@/store/themeStore', () => ({
 }));
 
 const mockView = {
-  book: { primaryLanguage: 'en', sections: [{ id: 0 }] },
+  book: { primaryLanguage: 'en', sections: [{ id: 0 }, { id: 1 }] },
   renderer: {
     getContents: () => [{ index: 0, doc: document as unknown as Document }],
     scrollToAnchor: vi.fn(),
@@ -110,6 +110,11 @@ const ttsControllerInstances: unknown[] = [];
 // race ahead and construct a second TTSController. The test releases all
 // pending resolvers once both dispatches have had a chance to interleave.
 const pendingInitResolvers: Array<() => void> = [];
+// Capture listeners the hook registers on the controller so tests can fire
+// controller-emitted events (e.g. 'tts-highlight-mark') directly.
+const controllerListeners: Record<string, ((e: Event) => void)[]> = {};
+// Test-mutable audiobook-active flag surfaced on the mock controller.
+const mockAudiobookClient = { initialized: false };
 
 vi.mock('@/services/tts', () => ({
   TTSController: vi.fn().mockImplementation(function (this: Record<string, unknown>) {
@@ -136,8 +141,16 @@ vi.mock('@/services/tts', () => ({
       getVoices: vi.fn().mockResolvedValue([]),
       getVoiceId: vi.fn().mockReturnValue(''),
       state: 'idle',
-      addEventListener: vi.fn(),
-      removeEventListener: vi.fn(),
+      ttsAudiobookClient: mockAudiobookClient,
+      addEventListener: vi.fn((type: string, handler: (e: Event) => void) => {
+        (controllerListeners[type] ||= []).push(handler);
+      }),
+      removeEventListener: vi.fn((type: string, handler: (e: Event) => void) => {
+        const arr = controllerListeners[type];
+        if (!arr) return;
+        const idx = arr.indexOf(handler);
+        if (idx >= 0) arr.splice(idx, 1);
+      }),
       dispatchEvent: vi.fn(),
     });
     ttsControllerInstances.push(this);
@@ -209,6 +222,12 @@ describe('useTTSControl concurrent tts-speak events', () => {
   beforeEach(() => {
     ttsControllerInstances.length = 0;
     pendingInitResolvers.length = 0;
+    for (const key of Object.keys(controllerListeners)) delete controllerListeners[key];
+    mockAudiobookClient.initialized = false;
+    mockView.resolveNavigation.mockClear();
+    mockView.renderer.goTo.mockClear();
+    mockView.renderer.scrollToAnchor.mockClear();
+    mockView.resolveCFI.mockReturnValue({ index: 0, anchor: () => new Range() });
   });
 
   afterEach(() => {
@@ -239,5 +258,58 @@ describe('useTTSControl concurrent tts-speak events', () => {
       while (pendingInitResolvers.length > 0) pendingInitResolvers.shift()!();
       await Promise.all([p1, p2]);
     });
+  });
+});
+
+describe('useTTSControl audio-as-leader behavior (audiobook)', () => {
+  beforeEach(() => {
+    ttsControllerInstances.length = 0;
+    pendingInitResolvers.length = 0;
+    for (const key of Object.keys(controllerListeners)) delete controllerListeners[key];
+    mockAudiobookClient.initialized = true;
+    mockView.resolveNavigation.mockClear();
+    mockView.renderer.goTo.mockClear();
+    mockView.renderer.scrollToAnchor.mockClear();
+    mockView.resolveCFI.mockReturnValue({ index: 0, anchor: () => new Range() });
+  });
+
+  afterEach(() => {
+    cleanup();
+    mockAudiobookClient.initialized = false;
+  });
+
+  // Helper: spin up the controller via the real tts-speak path and wait for
+  // the hook's listener-registration effect to attach handlers.
+  const startAndAwait = async () => {
+    const p = eventDispatcher.dispatch('tts-speak', { bookKey: 'book-1' });
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    while (pendingInitResolvers.length > 0) pendingInitResolvers.shift()!();
+    await p;
+    // Extra microtask flush so the post-setTtsController effect runs and
+    // registers the controller event listeners.
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+  };
+
+  it('navigates the view to the audio section when highlight-mark fires for a different section', async () => {
+    render(<Harness />);
+    await act(async () => {
+      await startAndAwait();
+    });
+
+    // Audio is on section 1; the view's primary rendered section is 0.
+    mockView.resolveCFI.mockReturnValue({ index: 1, anchor: () => new Range() });
+
+    const listeners = controllerListeners['tts-highlight-mark'] || [];
+    expect(listeners.length).toBeGreaterThan(0);
+
+    await act(async () => {
+      for (const handler of listeners) {
+        handler(new CustomEvent('tts-highlight-mark', { detail: { cfi: 'cfi-section-1' } }));
+      }
+    });
+
+    // Audio is the leader → the hook must navigate the view to the audio's section.
+    expect(mockView.resolveNavigation).toHaveBeenCalledWith(1);
+    expect(mockView.renderer.goTo).toHaveBeenCalled();
   });
 });

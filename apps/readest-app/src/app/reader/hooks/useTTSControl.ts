@@ -248,10 +248,20 @@ export const useTTSControl = ({ bookKey, onRequestHidePanel }: UseTTSControlProp
       viewSettings.ttsLocation = cfi;
       setViewSettings(bookKey, viewSettings);
 
-      if (!followingTTSLocationRef.current) return;
+      // Audio is the leader during audiobook playback. The user's stated
+      // intent is that wherever the audiobook is, that's where the page
+      // should be — so we skip the follow-gate and the cross-section
+      // early-return that are there for text-only TTS catch-up UX.
+      const audiobookLeading =
+        ttsControllerRef.current?.ttsAudiobookClient?.initialized === true;
+
+      if (!audiobookLeading && !followingTTSLocationRef.current) return;
 
       const docs = view.renderer.getContents();
-      if (docs.some(({ doc }) => (doc.getSelection()?.toString().length ?? 0) > 0)) {
+      if (
+        !audiobookLeading &&
+        docs.some(({ doc }) => (doc.getSelection()?.toString().length ?? 0) > 0)
+      ) {
         return;
       }
 
@@ -265,6 +275,16 @@ export const useTTSControl = ({ bookKey, onRequestHidePanel }: UseTTSControlProp
 
       const { anchor, index: ttsSectionIndex } = view.resolveCFI(cfi);
       if (viewSectionIndex !== ttsSectionIndex) {
+        // Text-only TTS: stay put and let the "Back to TTS" UI appear.
+        // Audiobook: drag the page over to where the audio is.
+        if (audiobookLeading && typeof ttsSectionIndex === 'number' && ttsSectionIndex >= 0) {
+          const sections = view.book?.sections;
+          if (sections && ttsSectionIndex < sections.length) {
+            sectionChangingTimestampRef.current = Date.now();
+            const resolved = view.resolveNavigation(ttsSectionIndex);
+            view.renderer.goTo?.(resolved);
+          }
+        }
         return;
       }
 
@@ -326,6 +346,13 @@ export const useTTSControl = ({ bookKey, onRequestHidePanel }: UseTTSControlProp
         view?.tts?.highlight(range);
       }
     } else {
+      // Audio-as-leader: during audiobook playback, handleHighlightMark is
+      // already driving navigation to match the audio, so never surface the
+      // "Back to TTS Location" recovery button. Keep follow-ref true.
+      if (ttsControllerRef.current?.ttsAudiobookClient?.initialized) {
+        setShowBackToCurrentTTSLocation(false);
+        return;
+      }
       const msSinceSectionChange = Date.now() - sectionChangingTimestampRef.current;
       if (msSinceSectionChange < 2000) return;
       setShowBackToCurrentTTSLocation(true);
@@ -422,7 +449,10 @@ export const useTTSControl = ({ bookKey, onRequestHidePanel }: UseTTSControlProp
   // Section change callback
   const handleSectionChange = useCallback(
     async (sectionIndex: number) => {
-      if (!followingTTSLocationRef.current) return;
+      // Audio is the leader during audiobook playback — always follow it.
+      const audiobookLeading =
+        ttsControllerRef.current?.ttsAudiobookClient?.initialized === true;
+      if (!audiobookLeading && !followingTTSLocationRef.current) return;
       const view = getView(bookKey);
       const sections = view?.book.sections;
       if (!sections || sectionIndex < 0 || sectionIndex >= sections.length) return;

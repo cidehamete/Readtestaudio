@@ -114,7 +114,11 @@ const pendingInitResolvers: Array<() => void> = [];
 // controller-emitted events (e.g. 'tts-highlight-mark') directly.
 const controllerListeners: Record<string, ((e: Event) => void)[]> = {};
 // Test-mutable audiobook-active flag surfaced on the mock controller.
-const mockAudiobookClient = { initialized: false };
+// Includes seekToText so the audiobook-seek handler can call it.
+const mockAudiobookClient = {
+  initialized: false,
+  seekToText: vi.fn(async (_text: string) => true),
+};
 
 vi.mock('@/services/tts', () => ({
   TTSController: vi.fn().mockImplementation(function (this: Record<string, unknown>) {
@@ -138,9 +142,12 @@ vi.mock('@/services/tts', () => ({
       shutdown: vi.fn().mockResolvedValue(undefined),
       forward: vi.fn().mockResolvedValue(undefined),
       backward: vi.fn().mockResolvedValue(undefined),
+      start: vi.fn().mockResolvedValue(undefined),
+      navigateToChapter: vi.fn().mockResolvedValue(undefined),
       getVoices: vi.fn().mockResolvedValue([]),
       getVoiceId: vi.fn().mockReturnValue(''),
       state: 'idle',
+      sectionIndex: 0,
       ttsAudiobookClient: mockAudiobookClient,
       addEventListener: vi.fn((type: string, handler: (e: Event) => void) => {
         (controllerListeners[type] ||= []).push(handler);
@@ -311,5 +318,92 @@ describe('useTTSControl audio-as-leader behavior (audiobook)', () => {
     // Audio is the leader → the hook must navigate the view to the audio's section.
     expect(mockView.resolveNavigation).toHaveBeenCalledWith(1);
     expect(mockView.renderer.goTo).toHaveBeenCalled();
+  });
+});
+
+describe('useTTSControl tts-audiobook-seek cross-chapter behavior', () => {
+  beforeEach(() => {
+    ttsControllerInstances.length = 0;
+    pendingInitResolvers.length = 0;
+    for (const key of Object.keys(controllerListeners)) delete controllerListeners[key];
+    mockAudiobookClient.initialized = true;
+    mockAudiobookClient.seekToText.mockClear();
+    mockAudiobookClient.seekToText.mockResolvedValue(true);
+    mockView.resolveNavigation.mockClear();
+    mockView.renderer.goTo.mockClear();
+    mockView.resolveCFI.mockReturnValue({ index: 0, anchor: () => new Range() });
+  });
+
+  afterEach(() => {
+    cleanup();
+    mockAudiobookClient.initialized = false;
+  });
+
+  const startAndAwait = async () => {
+    const p = eventDispatcher.dispatch('tts-speak', { bookKey: 'book-1' });
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    while (pendingInitResolvers.length > 0) pendingInitResolvers.shift()!();
+    await p;
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+  };
+
+  it('calls navigateToChapter when seek targets a different section than the current audio', async () => {
+    render(<Harness />);
+    await act(async () => {
+      await startAndAwait();
+    });
+
+    const controller = ttsControllerInstances[0] as {
+      sectionIndex: number;
+      navigateToChapter: ReturnType<typeof vi.fn>;
+    };
+    // Audio is currently in section 0; user tapped text in section 2.
+    controller.sectionIndex = 0;
+
+    // Advance past the 1500 ms intra-handler debounce window.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.setSystemTime(new Date('2030-01-01T00:00:00Z'));
+
+    await act(async () => {
+      await eventDispatcher.dispatch('tts-audiobook-seek', {
+        bookKey: 'book-1',
+        seekText: 'the cathedral stood silent',
+        sectionIndex: 2,
+      });
+    });
+
+    // Chapter index is section+1 per controller mapping; navigate first.
+    expect(controller.navigateToChapter).toHaveBeenCalledWith(3);
+
+    vi.useRealTimers();
+  });
+
+  it('skips navigateToChapter when seek targets the same section (fine-grained in-chapter seek)', async () => {
+    render(<Harness />);
+    await act(async () => {
+      await startAndAwait();
+    });
+
+    const controller = ttsControllerInstances[0] as {
+      sectionIndex: number;
+      navigateToChapter: ReturnType<typeof vi.fn>;
+    };
+    controller.sectionIndex = 2;
+
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.setSystemTime(new Date('2030-01-01T00:00:00Z'));
+
+    await act(async () => {
+      await eventDispatcher.dispatch('tts-audiobook-seek', {
+        bookKey: 'book-1',
+        seekText: 'the cathedral stood silent',
+        sectionIndex: 2,
+      });
+    });
+
+    expect(controller.navigateToChapter).not.toHaveBeenCalled();
+    expect(mockAudiobookClient.seekToText).toHaveBeenCalledWith('the cathedral stood silent');
+
+    vi.useRealTimers();
   });
 });

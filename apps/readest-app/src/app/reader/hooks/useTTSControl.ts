@@ -514,9 +514,11 @@ export const useTTSControl = ({ bookKey, onRequestHidePanel }: UseTTSControlProp
     [appService],
   );
 
-  // handleTTSAudiobookSeek — jump the audiobook narrator to a specific word.
-  // Fired by useLongPressEvent when the user long-presses a text word while
-  // an audiobook is playing. No-op if TTS is not active or not an audiobook.
+  // handleTTSAudiobookSeek — relocate the audiobook narrator to a tapped
+  // text position. Fired by the iframe long-press handler. Supports both
+  // in-chapter fine-grained seeks (via seekToText) and cross-chapter jumps
+  // (via navigateToChapter) so the user can move audio forward or backward
+  // anywhere in the book. No-op if TTS is not active or not an audiobook.
   const handleTTSAudiobookSeek = async (event: CustomEvent) => {
     // Debounce: selectionchange can fire multiple times as iOS expands the
     // selection. Ignore any seek that arrives within 1.5 s of the last one.
@@ -524,14 +526,49 @@ export const useTTSControl = ({ bookKey, onRequestHidePanel }: UseTTSControlProp
     if (now - lastAudiobookSeekTimeRef.current < 1500) return;
     lastAudiobookSeekTimeRef.current = now;
 
-    const { bookKey: ttsBookKey, seekText } = event.detail as {
+    const {
+      bookKey: ttsBookKey,
+      seekText,
+      sectionIndex,
+    } = event.detail as {
       bookKey: string;
       seekText: string;
+      sectionIndex?: number;
     };
     if (bookKey !== ttsBookKey) return;
     const existingController = ttsControllerRef.current;
     if (!existingController?.ttsAudiobookClient?.initialized || !seekText) return;
 
+    // Cross-chapter path: the user tapped text in a section the audio is
+    // not currently in. Jump chapters first (audiobook narrator restarts at
+    // the top of the new chapter), then try a fine-grained in-chapter seek.
+    const currentAudioSection = existingController.sectionIndex ?? -1;
+    if (typeof sectionIndex === 'number' && sectionIndex !== currentAudioSection) {
+      try {
+        // Controller maps chapterIndex (1-based) to sectionIndex (0-based)
+        // via chapterIndex - 1, so the inverse is sectionIndex + 1.
+        await existingController.navigateToChapter(sectionIndex + 1);
+      } catch (e) {
+        console.warn('[TTS] audiobook cross-chapter seek failed:', e);
+        return;
+      }
+      // Best-effort in-chapter refinement after the chapter swap. If the
+      // text doesn't match in the new chapter (e.g. timestamps still
+      // loading), we stay at the chapter's start — still a huge improvement
+      // over the prior silent-no-op behavior.
+      try {
+        const seeked = await existingController.ttsAudiobookClient.seekToText(seekText);
+        if (seeked) {
+          await existingController.stop();
+          await existingController.start();
+        }
+      } catch (e) {
+        console.warn('[TTS] audiobook in-chapter refinement failed:', e);
+      }
+      return;
+    }
+
+    // Same-chapter path: fine-grained word-level seek.
     const seeked = await existingController.ttsAudiobookClient.seekToText(seekText);
     if (seeked) {
       try {

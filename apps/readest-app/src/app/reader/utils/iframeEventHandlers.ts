@@ -513,8 +513,41 @@ export const addLongPressListeners = (bookKey: string, doc: Document) => {
     // Clear so we don't fire twice if the selection keeps changing
     lpTouchStart = null;
 
+    // Expand the payload to include a few words of surrounding context from
+    // the same block element. seekToText uses only the first ~4 key words,
+    // so with a single tapped word like "the", it picks the nearest instance
+    // to the current audio position instead of the one the user actually
+    // pointed at. With ~2 words before + selection + ~4 words after, the
+    // key-word set becomes near-unique and lands on the tapped location.
+    let phrase = selectedText;
+    try {
+      const range = selection.getRangeAt(0);
+      const startNode = range.startContainer;
+      const block =
+        (startNode.nodeType === Node.TEXT_NODE
+          ? (startNode.parentElement as Element | null)
+          : (startNode as Element)
+        )?.closest?.('p, li, blockquote, h1, h2, h3, h4, h5, h6, div') ?? null;
+      const blockText = (block?.textContent || '').replace(/\s+/g, ' ').trim();
+      if (blockText) {
+        const idx = blockText.indexOf(selectedText);
+        if (idx >= 0) {
+          const before = blockText.slice(0, idx).trim().split(/\s+/).slice(-2).join(' ');
+          const after = blockText
+            .slice(idx + selectedText.length)
+            .trim()
+            .split(/\s+/)
+            .slice(0, 4)
+            .join(' ');
+          phrase = [before, selectedText, after].filter(Boolean).join(' ').trim();
+        }
+      }
+    } catch {
+      // Fall back to the bare selection if anything goes wrong.
+    }
+
     window.postMessage(
-      { type: 'iframe-long-press', bookKey, elementType: 'word', word: selectedText },
+      { type: 'iframe-long-press', bookKey, elementType: 'word', word: phrase },
       '*',
     );
   };

@@ -57,9 +57,6 @@ export const useTTSControl = ({ bookKey, onRequestHidePanel }: UseTTSControlProp
   const previousSectionLabelRef = useRef<string | undefined>(undefined);
   const ttsControllerRef = useRef<TTSController | null>(null);
   const isStartingTTSRef = useRef(false);
-  // Debounce audiobook word-seeks: ignore events within 1.5 s of the last one
-  // to prevent rapid selectionchange firings from jumping to the wrong position.
-  const lastAudiobookSeekTimeRef = useRef(0);
   const [ttsController, setTtsController] = useState<TTSController | null>(null);
   const [ttsClientsInited, setTtsClientsInitialized] = useState(false);
 
@@ -252,8 +249,7 @@ export const useTTSControl = ({ bookKey, onRequestHidePanel }: UseTTSControlProp
       // intent is that wherever the audiobook is, that's where the page
       // should be — so we skip the follow-gate and the cross-section
       // early-return that are there for text-only TTS catch-up UX.
-      const audiobookLeading =
-        ttsControllerRef.current?.ttsAudiobookClient?.initialized === true;
+      const audiobookLeading = ttsControllerRef.current?.ttsAudiobookClient?.initialized === true;
 
       if (!audiobookLeading && !followingTTSLocationRef.current) return;
 
@@ -450,8 +446,7 @@ export const useTTSControl = ({ bookKey, onRequestHidePanel }: UseTTSControlProp
   const handleSectionChange = useCallback(
     async (sectionIndex: number) => {
       // Audio is the leader during audiobook playback — always follow it.
-      const audiobookLeading =
-        ttsControllerRef.current?.ttsAudiobookClient?.initialized === true;
+      const audiobookLeading = ttsControllerRef.current?.ttsAudiobookClient?.initialized === true;
       if (!audiobookLeading && !followingTTSLocationRef.current) return;
       const view = getView(bookKey);
       const sections = view?.book.sections;
@@ -514,107 +509,85 @@ export const useTTSControl = ({ bookKey, onRequestHidePanel }: UseTTSControlProp
     [appService],
   );
 
-  // handleTTSAudiobookSeek — relocate the audiobook narrator to a tapped
-  // text position. Fired by the iframe long-press handler. Supports both
-  // in-chapter fine-grained seeks (via seekToText) and cross-chapter jumps
-  // (via navigateToChapter) so the user can move audio forward or backward
-  // anywhere in the book. No-op if TTS is not active or not an audiobook.
-  const handleTTSAudiobookSeek = async (event: CustomEvent) => {
-    // Debounce: selectionchange can fire multiple times as iOS expands the
-    // selection. Ignore any seek that arrives within 1.5 s of the last one.
-    const now = Date.now();
-    if (now - lastAudiobookSeekTimeRef.current < 1500) return;
-    lastAudiobookSeekTimeRef.current = now;
+  const syncAudiobookCursorToSelection = useCallback(
+    async (sectionIndex?: number, range?: Range, cfi?: string) => {
+      const controller = ttsControllerRef.current;
+      const view = getView(bookKey);
+      const viewSettings = getViewSettings(bookKey);
+      const progress = getProgress(bookKey);
+      if (!controller || !view || !viewSettings) return;
 
+      const targetSectionIndex =
+        typeof sectionIndex === 'number' ? sectionIndex : controller.sectionIndex;
+      if (typeof targetSectionIndex === 'number' && targetSectionIndex >= 0) {
+        controller.sectionIndex = targetSectionIndex;
+        if (targetSectionIndex === (progress?.index ?? -1) && progress?.sectionLabel) {
+          controller.sectionLabel = progress.sectionLabel;
+        }
+        await controller.prepareSection(targetSectionIndex);
+      }
+
+      if (range) {
+        view.tts?.from(range);
+        try {
+          viewSettings.ttsLocation =
+            cfi ??
+            view.getCFI(
+              typeof targetSectionIndex === 'number' && targetSectionIndex >= 0
+                ? targetSectionIndex
+                : view.renderer.primaryIndex,
+              range,
+            );
+          setViewSettings(bookKey, viewSettings);
+        } catch {
+          // Best-effort only; lack of a CFI should not block audiobook relocation.
+        }
+      }
+
+      setShowBackToCurrentTTSLocation(false);
+      followingTTSLocationRef.current = true;
+    },
+    [bookKey, getProgress, getView, getViewSettings, setViewSettings],
+  );
+
+  // handleTTSAudiobookSeek — relocate the audiobook narrator to a tapped
+  // text position, but leave playback paused there. The next Play tap is the
+  // user gesture that resumes audio from the newly-cued spot.
+  const handleTTSAudiobookSeek = async (event: CustomEvent) => {
     const {
       bookKey: ttsBookKey,
       seekText,
       sectionIndex,
+      range,
+      cfi,
     } = event.detail as {
       bookKey: string;
       seekText: string;
       sectionIndex?: number;
+      range?: Range;
+      cfi?: string;
     };
     if (bookKey !== ttsBookKey) return;
     const existingController = ttsControllerRef.current;
     if (!existingController?.ttsAudiobookClient?.initialized || !seekText) return;
+    const targetSectionIndex =
+      typeof sectionIndex === 'number' ? sectionIndex : existingController.sectionIndex;
 
-    // iOS Safari autoplay policy: audio.play() only succeeds when invoked
-    // from a live user gesture. By the time this handler runs we are several
-    // awaits deep inside an async selectionchange chain — the gesture window
-    // has already closed. If the user had explicitly paused before the
-    // long-press, calling controller.start() (which calls audio.play()
-    // internally) is rejected with NotAllowedError. That error is swallowed
-    // by AudiobookTTSClient.resume()'s empty catch, leaving the app wedged:
-    // the long-press appears to do nothing.
-    //
-    // Behavior when paused: move audio.currentTime to the tapped word, but
-    // leave audio paused. The user's next Play tap is a real user gesture
-    // and resumes from the new position (speak()'s seek-align then emits
-    // the correct first mark). Cross-chapter while paused: bail entirely —
-    // loading a new chapter's audio src and play()ing it hits the same
-    // autoplay block, and there's no graceful "seek without play"
-    // equivalent across chapter boundaries.
-    const isPlaying = existingController.state === 'playing';
+    try {
+      await existingController.pause();
+      setIsPlaying(false);
+      setIsPaused(true);
 
-    // Cross-chapter path: the user tapped text in a section the audio is
-    // not currently in. Jump chapters first (audiobook narrator restarts at
-    // the top of the new chapter), then try a fine-grained in-chapter seek.
-    const currentAudioSection = existingController.sectionIndex ?? -1;
-    if (typeof sectionIndex === 'number' && sectionIndex !== currentAudioSection) {
-      if (!isPlaying) {
-        console.info(
-          '[TTS] audiobook cross-chapter seek skipped: audio is paused ' +
-            '(tap Play first, then long-press to seek)',
-        );
-        return;
-      }
-      try {
-        // Controller maps chapterIndex (1-based) to sectionIndex (0-based)
-        // via chapterIndex - 1, so the inverse is sectionIndex + 1.
-        await existingController.navigateToChapter(sectionIndex + 1);
-      } catch (e) {
-        console.warn('[TTS] audiobook cross-chapter seek failed:', e);
-        return;
-      }
-      // Best-effort in-chapter refinement after the chapter swap. If the
-      // text doesn't match in the new chapter (e.g. timestamps still
-      // loading), we stay at the chapter's start — still a huge improvement
-      // over the prior silent-no-op behavior.
-      try {
-        const seeked = await existingController.ttsAudiobookClient.seekToText(seekText);
-        if (seeked) {
-          // pause (not stop) — see comment in the same-chapter path below.
-          await existingController.pause();
-          await existingController.start();
-        }
-      } catch (e) {
-        console.warn('[TTS] audiobook in-chapter refinement failed:', e);
-      }
-      return;
-    }
+      await syncAudiobookCursorToSelection(targetSectionIndex, range, cfi);
 
-    // Same-chapter path: fine-grained word-level seek.
-    const seeked = await existingController.ttsAudiobookClient.seekToText(seekText);
-    if (seeked) {
-      if (!isPlaying) {
-        // audio.currentTime has already moved to the tapped word inside
-        // seekToText. Leave the player paused; the user's next Play tap
-        // resumes from the new position.
-        return;
-      }
-      try {
-        // Use pause (not stop) so that start() sees a 'paused' state and
-        // routes to view.tts.resume() — which re-emits SSML for the CURRENT
-        // block. stop() leaves state='stopped', making start() call
-        // view.tts.start() which in foliate-js resets to the section's
-        // first block. The subsequent pre-dispatch of marks[0] would then
-        // scroll the view to chapter start, undoing the seek.
-        await existingController.pause();
-        await existingController.start();
-      } catch (e) {
-        console.warn('[TTS] audiobook word-seek restart failed:', e);
-      }
+      await existingController.ttsAudiobookClient.cueToText(
+        seekText,
+        typeof targetSectionIndex === 'number' && targetSectionIndex >= 0
+          ? targetSectionIndex + 1
+          : undefined,
+      );
+    } catch (e) {
+      console.warn('[TTS] audiobook word-seek cue failed:', e);
     }
   };
 
@@ -625,28 +598,32 @@ export const useTTSControl = ({ bookKey, onRequestHidePanel }: UseTTSControlProp
 
     // Audiobook re-orient: if audiobook TTS is already running and the user
     // selected text, seek the audio to that text's position instead of
-    // tearing down and recreating the controller. This lets the user use
-    // the headphones icon on a selection as a "jump narrator here" control.
+    // tearing down and recreating the controller. Keep the audiobook paused
+    // at the new spot; the next explicit Play tap resumes from there.
     const existingController = ttsControllerRef.current;
     if (existingController?.ttsAudiobookClient?.initialized && range && !oneTime) {
       const selectedText = (range as Range).toString().trim();
       if (selectedText) {
-        const seeked = await existingController.ttsAudiobookClient.seekToText(selectedText);
-        if (seeked) {
-          const view = getView(bookKey);
+        const view = getView(bookKey);
+        const targetSectionIndex = typeof index === 'number' ? index : view?.renderer.primaryIndex;
+        let cfi: string | undefined;
+        if (view && typeof targetSectionIndex === 'number') {
           try {
-            await existingController.stop();
-            const ssml = view?.tts?.from(range as Range);
-            if (ssml) {
-              existingController.speak(ssml);
-            } else {
-              await existingController.start();
-            }
-          } catch (e) {
-            console.warn('[TTS] audiobook seek restart failed:', e);
+            cfi = view.getCFI(targetSectionIndex, range as Range);
+          } catch {
+            cfi = undefined;
           }
-          return;
         }
+        await handleTTSAudiobookSeek({
+          detail: {
+            bookKey,
+            seekText: selectedText,
+            sectionIndex: targetSectionIndex,
+            range,
+            cfi,
+          },
+        } as CustomEvent);
+        return;
       }
     }
 

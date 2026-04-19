@@ -48,6 +48,11 @@ interface AudiobookChapterTimestamps {
   words: AudiobookWord[];
 }
 
+interface CachedChapterTimestamps {
+  data: AudiobookChapterTimestamps;
+  normalizedWords: string[];
+}
+
 interface AudiobookChapter {
   index: number;
   title: string;
@@ -81,7 +86,7 @@ export class AudiobookTTSClient implements TTSClient {
   #primaryLang = 'en';
   #speakingLang = 'en';
   #currentChapterIndex = -1;
-  #timestampsCache = new Map<string, AudiobookChapterTimestamps>();
+  #timestampsCache = new Map<string, CachedChapterTimestamps>();
   #playbackRate = 1.0;
   #positionSaveIntervalId: ReturnType<typeof setInterval> | null = null;
   #lastTimeDispatchMs = 0;
@@ -190,14 +195,65 @@ export class AudiobookTTSClient implements TTSClient {
     return null;
   }
 
-  async #loadTimestamps(url: string): Promise<AudiobookChapterTimestamps | null> {
+  #findChapterByIndex(chapterIndex: number): AudiobookChapter | null {
+    return this.#manifest?.chapters.find((chapter) => chapter.index === chapterIndex) ?? null;
+  }
+
+  #normalizeWord(s: string): string {
+    return s
+      .toLowerCase()
+      .replace(/[^a-z0-9]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  #extractKeywords(text: string, minLength = 2, maxKeywords = 4): string[] {
+    return this.#normalizeWord(text)
+      .split(/\s+/)
+      .filter((word) => word.length >= minLength)
+      .slice(0, maxKeywords);
+  }
+
+  #findKeywordMatches(keyWords: string[], normalizedWords: string[]): number[] {
+    if (keyWords.length === 0 || normalizedWords.length === 0) return [];
+
+    const matches: number[] = [];
+    outer: for (let i = 0; i < normalizedWords.length; i++) {
+      if (!normalizedWords[i]?.includes(keyWords[0]!)) continue;
+      let last = i;
+      for (let ki = 1; ki < keyWords.length; ki++) {
+        const searchStart = last + 1;
+        const searchLimit = Math.min(
+          last + 1 + FUZZY_MAX_GAP_BETWEEN_KEYWORDS,
+          normalizedWords.length - 1,
+        );
+        let found = -1;
+        for (let j = searchStart; j <= searchLimit; j++) {
+          if (normalizedWords[j]?.includes(keyWords[ki]!)) {
+            found = j;
+            break;
+          }
+        }
+        if (found < 0) continue outer;
+        last = found;
+      }
+      matches.push(i);
+    }
+    return matches;
+  }
+
+  async #loadTimestamps(url: string): Promise<CachedChapterTimestamps | null> {
     if (this.#timestampsCache.has(url)) return this.#timestampsCache.get(url)!;
     try {
       const res = await fetch(url);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = (await res.json()) as AudiobookChapterTimestamps;
-      this.#timestampsCache.set(url, data);
-      return data;
+      const cached = {
+        data,
+        normalizedWords: data.words.map((word) => this.#normalizeWord(word.word)),
+      };
+      this.#timestampsCache.set(url, cached);
+      return cached;
     } catch (e) {
       console.warn('[AudiobookTTSClient] Failed to load timestamps:', e);
       this.#dispatchError(`Timestamps missing for a chapter — playing without word highlights.`);
@@ -222,23 +278,17 @@ export class AudiobookTTSClient implements TTSClient {
    */
   #matchMarksToTimestamps(
     marks: { text: string }[],
-    timestamps: AudiobookChapterTimestamps,
+    timestamps: CachedChapterTimestamps,
     pageStartAudioTime: number,
   ): { startTimes: number[]; endTimes: number[] } {
-    const norm = (s: string) =>
-      s
-        .toLowerCase()
-        .replace(/[^a-z0-9]/g, ' ')
-        .replace(/\s+/g, ' ')
-        .trim();
-
-    const wordNorms = timestamps.words.map((w) => norm(w.word));
-    const totalWords = timestamps.words.length;
-    const chapterEndTime = timestamps.words[totalWords - 1]?.end ?? 0;
+    const wordNorms = timestamps.normalizedWords;
+    const words = timestamps.data.words;
+    const totalWords = words.length;
+    const chapterEndTime = words[totalWords - 1]?.end ?? 0;
 
     // Find the first word at or after pageStartAudioTime, then step back a few
     // words to allow for minor timing imprecision in the audio element.
-    let searchPos = timestamps.words.findIndex((w) => w.start >= pageStartAudioTime);
+    let searchPos = words.findIndex((w) => w.start >= pageStartAudioTime);
     if (searchPos < 0) searchPos = totalWords;
     searchPos = Math.max(0, searchPos - FUZZY_SEARCH_LOOKBACK_WORDS);
 
@@ -257,10 +307,7 @@ export class AudiobookTTSClient implements TTSClient {
       // Extract up to 5 content keywords from the mark text. Filter out
       // short words (≤2 chars like "I", "am", "a", "it") whose text is
       // noisy to match against; they appear in almost every sentence.
-      const keyWords = norm(mark.text)
-        .split(/\s+/)
-        .filter((w) => w.length > 2)
-        .slice(0, 5);
+      const keyWords = this.#extractKeywords(mark.text, 3, 5);
 
       let matchStart = -1;
       let matchEnd = -1;
@@ -301,8 +348,8 @@ export class AudiobookTTSClient implements TTSClient {
       }
 
       if (matchStart >= 0) {
-        const tStart = timestamps.words[matchStart]!.start;
-        const tEnd = timestamps.words[matchEnd]!.end;
+        const tStart = words[matchStart]!.start;
+        const tEnd = words[matchEnd]!.end;
         // Clamp to pageStartAudioTime so marks earlier than the audio
         // position fire immediately rather than being skipped.
         startTimes.push(Math.max(pageStartAudioTime, tStart));
@@ -338,42 +385,21 @@ export class AudiobookTTSClient implements TTSClient {
    */
   async #seekToPageStart(
     firstMarkText: string,
-    timestamps: AudiobookChapterTimestamps,
+    timestamps: CachedChapterTimestamps,
   ): Promise<void> {
     if (!this.#audioEl || !firstMarkText.trim()) return;
 
-    const norm = (s: string) =>
-      s
-        .toLowerCase()
-        .replace(/[^a-z0-9]/g, ' ')
-        .replace(/\s+/g, ' ')
-        .trim();
-
-    const keyWords = norm(firstMarkText)
-      .split(/\s+/)
-      .filter((w) => w.length > 2)
-      .slice(0, 5);
+    const keyWords = this.#extractKeywords(firstMarkText, 3, 5);
     if (keyWords.length === 0) return;
 
-    const wordNorms = timestamps.words.map((w) => norm(w.word));
-    const limit = timestamps.words.length - keyWords.length;
-
-    for (let i = 0; i <= limit; i++) {
-      let ok = true;
-      for (let ki = 0; ki < keyWords.length; ki++) {
-        if (!wordNorms[i + ki]?.includes(keyWords[ki]!)) {
-          ok = false;
-          break;
-        }
-      }
-      if (ok) {
-        const targetTime = timestamps.words[i]!.start;
-        console.info(
-          `[AudiobookTTSClient] chapter start seek: "${firstMarkText.slice(0, 40)}" → ${targetTime.toFixed(2)}s`,
-        );
-        this.#audioEl.currentTime = targetTime;
-        return;
-      }
+    const matchIndex = this.#findKeywordMatches(keyWords, timestamps.normalizedWords)[0];
+    if (matchIndex !== undefined) {
+      const targetTime = timestamps.data.words[matchIndex]!.start;
+      console.info(
+        `[AudiobookTTSClient] chapter start seek: "${firstMarkText.slice(0, 40)}" → ${targetTime.toFixed(2)}s`,
+      );
+      this.#setAudioTime(targetTime);
+      return;
     }
 
     console.info(
@@ -400,6 +426,52 @@ export class AudiobookTTSClient implements TTSClient {
     this.#loadTimestamps(nextChapter.timestamps_url);
   }
 
+  async #waitForAudioReady(audio: HTMLAudioElement): Promise<void> {
+    if (audio.readyState >= 1) return;
+    await new Promise<void>((resolve) => {
+      const done = () => {
+        audio.removeEventListener('loadedmetadata', done);
+        audio.removeEventListener('canplay', done);
+        audio.removeEventListener('error', done);
+        resolve();
+      };
+      audio.addEventListener('loadedmetadata', done, { once: true });
+      audio.addEventListener('canplay', done, { once: true });
+      audio.addEventListener('error', done, { once: true });
+      audio.load?.();
+    });
+  }
+
+  async #setActiveChapter(chapter: AudiobookChapter): Promise<void> {
+    if (!this.#audioEl) return;
+    const chapterChanged = this.#currentChapterIndex !== chapter.index;
+    if (!chapterChanged) {
+      this.#audioEl.playbackRate = this.#playbackRate;
+      return;
+    }
+
+    if (
+      this.#nextAudioEl &&
+      this.#nextAudioEl.src === chapter.audio_url &&
+      this.#nextAudioEl.readyState >= 1
+    ) {
+      const prev = this.#audioEl;
+      prev.pause();
+      prev.removeEventListener('timeupdate', this.#handleTimeUpdate);
+      this.#audioEl = this.#nextAudioEl;
+      this.#audioEl.addEventListener('timeupdate', this.#handleTimeUpdate);
+      this.#nextAudioEl = prev;
+      this.#nextAudioEl.src = '';
+    } else if (this.#audioEl.src !== chapter.audio_url) {
+      this.#audioEl.src = chapter.audio_url;
+    }
+
+    await this.#waitForAudioReady(this.#audioEl);
+    this.#audioEl.playbackRate = this.#playbackRate;
+    this.#currentChapterIndex = chapter.index;
+    this.#dispatchCurrentTime(true);
+  }
+
   // ── Resume position ───────────────────────────────────────────────────────────
 
   #positionKey(chapterIndex: number): string {
@@ -421,13 +493,12 @@ export class AudiobookTTSClient implements TTSClient {
 
   // ── Time update ───────────────────────────────────────────────────────────────
 
-  /** Throttled to ~4 Hz; dispatches current playback position to the controller. */
-  #handleTimeUpdate = (): void => {
-    const now = Date.now();
-    if (now - this.#lastTimeDispatchMs < 250) return;
-    this.#lastTimeDispatchMs = now;
+  #dispatchCurrentTime(force = false): void {
     if (!this.#audioEl || !this.#manifest) return;
-    const chapter = this.#manifest.chapters.find((c) => c.index === this.#currentChapterIndex);
+    const now = Date.now();
+    if (!force && now - this.#lastTimeDispatchMs < 250) return;
+    this.#lastTimeDispatchMs = now;
+    const chapter = this.#findChapterByIndex(this.#currentChapterIndex);
     this.controller?.dispatchEvent(
       new CustomEvent('tts-audiobook-time', {
         detail: {
@@ -438,7 +509,21 @@ export class AudiobookTTSClient implements TTSClient {
         },
       }),
     );
+  }
+
+  /** Throttled to ~4 Hz; dispatches current playback position to the controller. */
+  #handleTimeUpdate = (): void => {
+    this.#dispatchCurrentTime();
   };
+
+  #setAudioTime(seconds: number): void {
+    if (!this.#audioEl) return;
+    const duration = Number.isFinite(this.#audioEl.duration) && this.#audioEl.duration > 0;
+    const maxTime = duration ? this.#audioEl.duration : seconds;
+    this.#audioEl.currentTime = Math.max(0, Math.min(maxTime, seconds));
+    this.#savePosition();
+    this.#dispatchCurrentTime(true);
+  }
 
   // ── Error dispatching ─────────────────────────────────────────────────────────
 
@@ -453,9 +538,13 @@ export class AudiobookTTSClient implements TTSClient {
     return new Promise((resolve) => {
       const audio = this.#audioEl!;
       let rafId: number;
+      const onAbort = () => done();
+      const onEnded = () => done();
 
       const done = () => {
         cancelAnimationFrame(rafId);
+        signal.removeEventListener('abort', onAbort);
+        audio.removeEventListener('ended', onEnded);
         resolve();
       };
 
@@ -467,8 +556,8 @@ export class AudiobookTTSClient implements TTSClient {
         rafId = requestAnimationFrame(tick);
       };
 
-      signal.addEventListener('abort', done, { once: true });
-      audio.addEventListener('ended', done, { once: true });
+      signal.addEventListener('abort', onAbort, { once: true });
+      audio.addEventListener('ended', onEnded, { once: true });
       rafId = requestAnimationFrame(tick);
     });
   }
@@ -500,7 +589,7 @@ export class AudiobookTTSClient implements TTSClient {
     }
 
     const timestamps = await this.#loadTimestamps(chapter.timestamps_url);
-    if (!timestamps || timestamps.words.length === 0) {
+    if (!timestamps || timestamps.data.words.length === 0) {
       yield { code: 'end' } as TTSMessageEvent;
       return;
     }
@@ -517,28 +606,10 @@ export class AudiobookTTSClient implements TTSClient {
     // doesn't reset currentTime.
     const chapterChanged = this.#currentChapterIndex !== chapter.index;
     if (chapterChanged) {
-      // Swap in preloaded element if it already has the right src
-      if (
-        this.#nextAudioEl &&
-        this.#nextAudioEl.src === chapter.audio_url &&
-        this.#nextAudioEl.readyState >= 2
-      ) {
-        const prev = this.#audioEl;
-        prev.pause();
-        prev.removeEventListener('timeupdate', this.#handleTimeUpdate);
-        this.#audioEl = this.#nextAudioEl;
-        this.#audioEl.addEventListener('timeupdate', this.#handleTimeUpdate);
-        this.#nextAudioEl = prev; // recycle for next preload
-        this.#nextAudioEl.src = '';
-      } else if (this.#audioEl.src !== chapter.audio_url) {
-        this.#audioEl.src = chapter.audio_url;
-      }
-      this.#audioEl.playbackRate = this.#playbackRate;
-      this.#currentChapterIndex = chapter.index;
-
+      await this.#setActiveChapter(chapter);
       const savedPos = this.#loadPosition(chapter.index);
       if (savedPos > 0) {
-        this.#audioEl.currentTime = savedPos;
+        this.#setAudioTime(savedPos);
       } else if (marks.length > 0) {
         // No saved position — seek to the first mark's text so the audio
         // starts at the current page rather than from the chapter beginning.
@@ -551,7 +622,7 @@ export class AudiobookTTSClient implements TTSClient {
     this.#preloadNextChapter(chapter.index);
 
     const pageStartAudioTime = this.#audioEl.currentTime;
-    const chapterEndTime = timestamps.words[timestamps.words.length - 1]!.end;
+    const chapterEndTime = timestamps.data.words[timestamps.data.words.length - 1]!.end;
 
     // Audio-past-chapter fast-path: if the audio has already advanced past
     // the last word of the chapter (e.g. because a previous block's marks
@@ -684,7 +755,8 @@ export class AudiobookTTSClient implements TTSClient {
   async pause(): Promise<boolean> {
     this.#audioEl?.pause();
     this.#savePosition();
-    return true;
+    this.#dispatchCurrentTime(true);
+    return false;
   }
 
   async resume(): Promise<boolean> {
@@ -703,6 +775,7 @@ export class AudiobookTTSClient implements TTSClient {
     if (this.#audioEl) {
       this.#savePosition();
       this.#audioEl.pause();
+      this.#dispatchCurrentTime(true);
     }
     // Keep #currentChapterIndex so same-chapter speak() calls skip reload.
   }
@@ -710,25 +783,55 @@ export class AudiobookTTSClient implements TTSClient {
   /** Skip backward by the given number of seconds (default 15). */
   async skipBack(seconds = 15): Promise<void> {
     if (this.#audioEl) {
-      this.#audioEl.currentTime = Math.max(0, this.#audioEl.currentTime - seconds);
+      this.#setAudioTime(this.#audioEl.currentTime - seconds);
     }
   }
 
   /** Skip forward by the given number of seconds (default 30). */
   async skipForward(seconds = 30): Promise<void> {
     if (this.#audioEl) {
-      this.#audioEl.currentTime = Math.min(
-        this.#audioEl.duration || 0,
-        this.#audioEl.currentTime + seconds,
-      );
+      this.#setAudioTime(this.#audioEl.currentTime + seconds);
     }
   }
 
   /** Seek to an absolute time in seconds within the current chapter. */
   async seekTo(seconds: number): Promise<void> {
     if (this.#audioEl) {
-      this.#audioEl.currentTime = Math.max(0, Math.min(this.#audioEl.duration || 0, seconds));
+      this.#setAudioTime(seconds);
     }
+  }
+
+  #seekWithinChapterText(
+    text: string,
+    timestamps: CachedChapterTimestamps,
+    preferNearest = true,
+  ): boolean {
+    if (!this.#audioEl || timestamps.data.words.length === 0) return false;
+
+    const keyWords = this.#extractKeywords(text, 2, 4);
+    if (keyWords.length === 0) return false;
+
+    const matches = this.#findKeywordMatches(keyWords, timestamps.normalizedWords);
+    if (matches.length === 0) {
+      console.info(`[AudiobookTTSClient] seekToText: no match for "${text.slice(0, 40)}"`);
+      return false;
+    }
+
+    const now = this.#audioEl.currentTime;
+    const best = preferNearest
+      ? matches.reduce((closest, candidate) => {
+          const closestDistance = Math.abs((timestamps.data.words[closest]?.start ?? 0) - now);
+          const candidateDistance = Math.abs((timestamps.data.words[candidate]?.start ?? 0) - now);
+          return candidateDistance < closestDistance ? candidate : closest;
+        }, matches[0]!)
+      : matches[0]!;
+
+    const targetTime = timestamps.data.words[best]!.start;
+    console.info(
+      `[AudiobookTTSClient] seekToText: "${text.slice(0, 40)}" → ${targetTime.toFixed(2)}s`,
+    );
+    this.#setAudioTime(targetTime);
+    return true;
   }
 
   /**
@@ -741,60 +844,32 @@ export class AudiobookTTSClient implements TTSClient {
    */
   async seekToText(text: string): Promise<boolean> {
     if (!this.#manifest || !this.#audioEl || this.#currentChapterIndex < 0) return false;
-    const chapter = this.#manifest.chapters.find((c) => c.index === this.#currentChapterIndex);
+    const chapter = this.#findChapterByIndex(this.#currentChapterIndex);
     if (!chapter) return false;
     const timestamps = await this.#loadTimestamps(chapter.timestamps_url);
-    if (!timestamps || timestamps.words.length === 0) return false;
+    if (!timestamps) return false;
+    return this.#seekWithinChapterText(text, timestamps, true);
+  }
 
-    const norm = (s: string) =>
-      s
-        .toLowerCase()
-        .replace(/[^a-z0-9]/g, ' ')
-        .replace(/\s+/g, ' ')
-        .trim();
+  async cueToText(text: string, chapterIndex?: number): Promise<boolean> {
+    if (!this.#manifest || !this.#audioEl) return false;
+    const chapter = chapterIndex
+      ? this.#findChapterByIndex(chapterIndex)
+      : this.#findChapterByIndex(this.#currentChapterIndex);
+    if (!chapter) return false;
 
-    const keyWords = norm(text)
-      .split(/\s+/)
-      .filter((w) => w.length > 1)
-      .slice(0, 4);
-    if (keyWords.length === 0) return false;
+    await this.#setActiveChapter(chapter);
+    const timestamps = await this.#loadTimestamps(chapter.timestamps_url);
+    if (!timestamps) return false;
 
-    const wordNorms = timestamps.words.map((w) => norm(w.word));
-    const limit = timestamps.words.length - keyWords.length;
-    const matches: number[] = [];
-    for (let i = 0; i <= limit; i++) {
-      let ok = true;
-      for (let j = 0; j < keyWords.length; j++) {
-        if (!wordNorms[i + j]?.includes(keyWords[j]!)) {
-          ok = false;
-          break;
-        }
-      }
-      if (ok) matches.push(i);
+    const didSeek = this.#seekWithinChapterText(text, timestamps, false);
+    if (!didSeek && this.#currentChapterIndex === chapter.index) {
+      this.#dispatchCurrentTime(true);
     }
-
-    if (matches.length === 0) {
-      console.info(`[AudiobookTTSClient] seekToText: no match for "${text.slice(0, 40)}"`);
-      return false;
-    }
-
-    // Pick the match closest to the current audio position
-    const now = this.#audioEl.currentTime;
-    let best = matches[0]!;
-    let bestDist = Math.abs((timestamps.words[best]?.start ?? 0) - now);
-    for (const m of matches) {
-      const d = Math.abs((timestamps.words[m]?.start ?? 0) - now);
-      if (d < bestDist) {
-        best = m;
-        bestDist = d;
-      }
-    }
-    const targetTime = timestamps.words[best]!.start;
-    console.info(
-      `[AudiobookTTSClient] seekToText: "${text.slice(0, 40)}" → ${targetTime.toFixed(2)}s`,
-    );
-    this.#audioEl.currentTime = targetTime;
-    return true;
+    this.#audioEl.pause();
+    this.#savePosition();
+    this.#dispatchCurrentTime(true);
+    return didSeek;
   }
 
   // ── Settings ─────────────────────────────────────────────────────────────────

@@ -444,15 +444,31 @@ const FoliateViewer: React.FC<{
   const handleWordPress = useCallback(
     (word: string) => {
       if (!word) return;
-      // Include the visible section index so the TTS hook can bounce the
-      // audiobook to that chapter when the user taps text outside the
-      // currently-playing chapter. Without this, cross-chapter taps
-      // silently no-op (seekToText only searches the current chapter).
-      const sectionIndex = viewRef.current?.renderer?.primaryIndex;
+      const view = viewRef.current;
+      const sectionIndex = view?.renderer?.primaryIndex;
+      const doc = view?.renderer
+        ?.getContents()
+        .find((content) => content.index === sectionIndex)?.doc;
+      const selection = doc?.getSelection();
+      const range =
+        selection && !selection.isCollapsed && selection.rangeCount > 0
+          ? selection.getRangeAt(0).cloneRange()
+          : undefined;
+      let cfi: string | undefined;
+      if (view && typeof sectionIndex === 'number' && range) {
+        try {
+          cfi = view.getCFI(sectionIndex, range);
+        } catch {
+          cfi = undefined;
+        }
+      }
+
       eventDispatcher.dispatch('tts-audiobook-seek', {
         bookKey,
         seekText: word,
         sectionIndex: typeof sectionIndex === 'number' ? sectionIndex : undefined,
+        range,
+        cfi,
       });
     },
     [bookKey],

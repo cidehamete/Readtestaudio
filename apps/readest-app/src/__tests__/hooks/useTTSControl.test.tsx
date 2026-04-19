@@ -118,6 +118,7 @@ const controllerListeners: Record<string, ((e: Event) => void)[]> = {};
 const mockAudiobookClient = {
   initialized: false,
   seekToText: vi.fn(async (_text: string) => true),
+  cueToText: vi.fn(async (_text: string, _chapterIndex?: number) => true),
 };
 
 vi.mock('@/services/tts', () => ({
@@ -130,6 +131,7 @@ vi.mock('@/services/tts', () => ({
           }),
       ),
       initViewTTS: vi.fn().mockResolvedValue(undefined),
+      prepareSection: vi.fn().mockResolvedValue(true),
       updateHighlightOptions: vi.fn(),
       setLang: vi.fn(),
       setRate: vi.fn(),
@@ -329,6 +331,8 @@ describe('useTTSControl tts-audiobook-seek cross-chapter behavior', () => {
     mockAudiobookClient.initialized = true;
     mockAudiobookClient.seekToText.mockClear();
     mockAudiobookClient.seekToText.mockResolvedValue(true);
+    mockAudiobookClient.cueToText.mockClear();
+    mockAudiobookClient.cueToText.mockResolvedValue(true);
     mockView.resolveNavigation.mockClear();
     mockView.renderer.goTo.mockClear();
     mockView.resolveCFI.mockReturnValue({ index: 0, anchor: () => new Range() });
@@ -347,7 +351,7 @@ describe('useTTSControl tts-audiobook-seek cross-chapter behavior', () => {
     for (let i = 0; i < 10; i++) await Promise.resolve();
   };
 
-  it('calls navigateToChapter when seek targets a different section than the current audio', async () => {
+  it('prepares the tapped section and cues the audiobook without autoplay on cross-chapter long-press', async () => {
     render(<Harness />);
     await act(async () => {
       await startAndAwait();
@@ -356,97 +360,13 @@ describe('useTTSControl tts-audiobook-seek cross-chapter behavior', () => {
     const controller = ttsControllerInstances[0] as {
       state: string;
       sectionIndex: number;
-      navigateToChapter: ReturnType<typeof vi.fn>;
-    };
-    // Audio is currently in section 0; user tapped text in section 2.
-    controller.sectionIndex = 0;
-    // Audio is actively playing (the iOS-autoplay-safe condition for
-    // cross-chapter navigation + automatic play from the new position).
-    controller.state = 'playing';
-
-    // Advance past the 1500 ms intra-handler debounce window.
-    vi.useFakeTimers({ shouldAdvanceTime: true });
-    vi.setSystemTime(new Date('2030-01-01T00:00:00Z'));
-
-    await act(async () => {
-      await eventDispatcher.dispatch('tts-audiobook-seek', {
-        bookKey: 'book-1',
-        seekText: 'the cathedral stood silent',
-        sectionIndex: 2,
-      });
-    });
-
-    // Chapter index is section+1 per controller mapping; navigate first.
-    expect(controller.navigateToChapter).toHaveBeenCalledWith(3);
-
-    vi.useRealTimers();
-  });
-
-  it('skips navigateToChapter when seek targets the same section (fine-grained in-chapter seek)', async () => {
-    render(<Harness />);
-    await act(async () => {
-      await startAndAwait();
-    });
-
-    const controller = ttsControllerInstances[0] as {
-      state: string;
-      sectionIndex: number;
-      navigateToChapter: ReturnType<typeof vi.fn>;
-    };
-    controller.sectionIndex = 2;
-    controller.state = 'playing';
-
-    vi.useFakeTimers({ shouldAdvanceTime: true });
-    vi.setSystemTime(new Date('2030-01-01T00:00:00Z'));
-
-    await act(async () => {
-      await eventDispatcher.dispatch('tts-audiobook-seek', {
-        bookKey: 'book-1',
-        seekText: 'the cathedral stood silent',
-        sectionIndex: 2,
-      });
-    });
-
-    expect(controller.navigateToChapter).not.toHaveBeenCalled();
-    expect(mockAudiobookClient.seekToText).toHaveBeenCalledWith('the cathedral stood silent');
-
-    vi.useRealTimers();
-  });
-
-  // Regression: a successful same-chapter seekToText was followed by
-  // controller.stop() + controller.start(). Because stop() leaves state
-  // as 'stopped' (not containing 'paused'), start() routes to
-  // view.tts.start() — which in foliate-js resets the TTS cursor to the
-  // FIRST block of the section. The pre-dispatch of marks[0] then
-  // scrolls the view to chapter start, undoing the seek.
-  //
-  // Fix: use pause() instead of stop(). pause() sets state='paused',
-  // which makes start() route to view.tts.resume() — the current block.
-  it('uses pause (not stop) before start on same-chapter seek so view does not reset to chapter start', async () => {
-    render(<Harness />);
-    await act(async () => {
-      await startAndAwait();
-    });
-
-    const controller = ttsControllerInstances[0] as {
-      state: string;
-      sectionIndex: number;
-      navigateToChapter: ReturnType<typeof vi.fn>;
-      stop: ReturnType<typeof vi.fn>;
       pause: ReturnType<typeof vi.fn>;
+      prepareSection: ReturnType<typeof vi.fn>;
+      navigateToChapter: ReturnType<typeof vi.fn>;
       start: ReturnType<typeof vi.fn>;
     };
-    controller.sectionIndex = 2;
-    // This test covers the actively-playing case — the pause→start dance
-    // only applies when audio was already playing. The paused case is
-    // covered by the dedicated iOS-autoplay-safety test below.
+    controller.sectionIndex = 0;
     controller.state = 'playing';
-    controller.stop.mockClear();
-    controller.pause.mockClear();
-    controller.start.mockClear();
-
-    vi.useFakeTimers({ shouldAdvanceTime: true });
-    vi.setSystemTime(new Date('2030-01-01T00:00:00Z'));
 
     await act(async () => {
       await eventDispatcher.dispatch('tts-audiobook-seek', {
@@ -456,34 +376,46 @@ describe('useTTSControl tts-audiobook-seek cross-chapter behavior', () => {
       });
     });
 
-    // Sanity: seek fired.
-    expect(mockAudiobookClient.seekToText).toHaveBeenCalledWith('the cathedral stood silent');
-    // Must NOT stop (that would route start() through view.tts.start() →
-    // chapter-beginning SSML → view snaps back to chapter start).
-    expect(controller.stop).not.toHaveBeenCalled();
-    // Must pause so start() sees a paused state and uses view.tts.resume().
     expect(controller.pause).toHaveBeenCalled();
-    // And must restart so the speak iterator re-enters with current audio time,
-    // letting AudiobookTTSClient.speak()'s seek-align skip past-time marks.
-    expect(controller.start).toHaveBeenCalled();
-
-    vi.useRealTimers();
+    expect(controller.prepareSection).toHaveBeenCalledWith(2);
+    expect(mockAudiobookClient.cueToText).toHaveBeenCalledWith('the cathedral stood silent', 3);
+    expect(controller.navigateToChapter).not.toHaveBeenCalled();
+    expect(controller.start).not.toHaveBeenCalled();
   });
 
-  // Regression: when the user had explicitly paused before long-pressing,
-  // calling controller.start() would try to audio.play() from inside the
-  // async selectionchange → seek chain. iOS Safari's autoplay policy
-  // requires play() to be triggered directly by a user gesture; anything
-  // several awaits deep is rejected with NotAllowedError. The error is
-  // swallowed by resume()'s empty catch, so the app silently wedges —
-  // long-press appears to do nothing.
-  //
-  // Fix: only restart playback when we were already playing. When paused,
-  // seekToText still moves audio.currentTime, but we leave the audio
-  // paused. The user's next Play tap is a real user gesture and will
-  // resume from the new position; speak()'s seek-align emits the correct
-  // first mark at that point.
-  it('does NOT call controller.start() on seek when user is paused (iOS autoplay safety)', async () => {
+  it('cues the current chapter without restarting playback on same-chapter long-press', async () => {
+    render(<Harness />);
+    await act(async () => {
+      await startAndAwait();
+    });
+
+    const controller = ttsControllerInstances[0] as {
+      state: string;
+      sectionIndex: number;
+      pause: ReturnType<typeof vi.fn>;
+      prepareSection: ReturnType<typeof vi.fn>;
+      navigateToChapter: ReturnType<typeof vi.fn>;
+      start: ReturnType<typeof vi.fn>;
+    };
+    controller.sectionIndex = 2;
+    controller.state = 'playing';
+
+    await act(async () => {
+      await eventDispatcher.dispatch('tts-audiobook-seek', {
+        bookKey: 'book-1',
+        seekText: 'the cathedral stood silent',
+        sectionIndex: 2,
+      });
+    });
+
+    expect(controller.pause).toHaveBeenCalled();
+    expect(controller.prepareSection).toHaveBeenCalledWith(2);
+    expect(controller.navigateToChapter).not.toHaveBeenCalled();
+    expect(mockAudiobookClient.cueToText).toHaveBeenCalledWith('the cathedral stood silent', 3);
+    expect(controller.start).not.toHaveBeenCalled();
+  });
+
+  it('never auto-restarts playback after a same-chapter cue', async () => {
     render(<Harness />);
     await act(async () => {
       await startAndAwait();
@@ -495,17 +427,15 @@ describe('useTTSControl tts-audiobook-seek cross-chapter behavior', () => {
       navigateToChapter: ReturnType<typeof vi.fn>;
       stop: ReturnType<typeof vi.fn>;
       pause: ReturnType<typeof vi.fn>;
+      prepareSection: ReturnType<typeof vi.fn>;
       start: ReturnType<typeof vi.fn>;
     };
     controller.sectionIndex = 2;
-    // User had explicitly hit Pause prior to the long-press.
-    controller.state = 'paused';
+    controller.state = 'playing';
     controller.stop.mockClear();
     controller.pause.mockClear();
+    controller.prepareSection.mockClear();
     controller.start.mockClear();
-
-    vi.useFakeTimers({ shouldAdvanceTime: true });
-    vi.setSystemTime(new Date('2030-01-01T00:00:00Z'));
 
     await act(async () => {
       await eventDispatcher.dispatch('tts-audiobook-seek', {
@@ -515,18 +445,14 @@ describe('useTTSControl tts-audiobook-seek cross-chapter behavior', () => {
       });
     });
 
-    // Seek must still fire — audio.currentTime should move to the tapped word.
-    expect(mockAudiobookClient.seekToText).toHaveBeenCalledWith('the cathedral stood silent');
-    // But we must NOT try to restart playback. controller.start() internally
-    // calls audio.play(), which iOS Safari will reject from inside this async
-    // chain because the user had paused. Leaving audio paused is the correct
-    // behavior — the user taps Play (a real gesture) to resume.
+    expect(controller.stop).not.toHaveBeenCalled();
+    expect(controller.pause).toHaveBeenCalled();
+    expect(controller.prepareSection).toHaveBeenCalledWith(2);
+    expect(mockAudiobookClient.cueToText).toHaveBeenCalledWith('the cathedral stood silent', 3);
     expect(controller.start).not.toHaveBeenCalled();
-
-    vi.useRealTimers();
   });
 
-  it('skips the cross-chapter navigate+restart entirely when user is paused', async () => {
+  it('does NOT call controller.start() on cue when user is already paused', async () => {
     render(<Harness />);
     await act(async () => {
       await startAndAwait();
@@ -536,17 +462,53 @@ describe('useTTSControl tts-audiobook-seek cross-chapter behavior', () => {
       state: string;
       sectionIndex: number;
       navigateToChapter: ReturnType<typeof vi.fn>;
+      stop: ReturnType<typeof vi.fn>;
+      pause: ReturnType<typeof vi.fn>;
+      prepareSection: ReturnType<typeof vi.fn>;
       start: ReturnType<typeof vi.fn>;
     };
-    // Audio is currently in section 0; user tapped in section 2 while paused.
+    controller.sectionIndex = 2;
+    controller.state = 'paused';
+    controller.stop.mockClear();
+    controller.pause.mockClear();
+    controller.prepareSection.mockClear();
+    controller.start.mockClear();
+
+    await act(async () => {
+      await eventDispatcher.dispatch('tts-audiobook-seek', {
+        bookKey: 'book-1',
+        seekText: 'the cathedral stood silent',
+        sectionIndex: 2,
+      });
+    });
+
+    expect(controller.pause).toHaveBeenCalled();
+    expect(controller.prepareSection).toHaveBeenCalledWith(2);
+    expect(mockAudiobookClient.cueToText).toHaveBeenCalledWith('the cathedral stood silent', 3);
+    expect(controller.start).not.toHaveBeenCalled();
+  });
+
+  it('keeps cross-chapter long-press paused too', async () => {
+    render(<Harness />);
+    await act(async () => {
+      await startAndAwait();
+    });
+
+    const controller = ttsControllerInstances[0] as {
+      state: string;
+      sectionIndex: number;
+      pause: ReturnType<typeof vi.fn>;
+      prepareSection: ReturnType<typeof vi.fn>;
+      navigateToChapter: ReturnType<typeof vi.fn>;
+      start: ReturnType<typeof vi.fn>;
+    };
     controller.sectionIndex = 0;
     controller.state = 'paused';
+    controller.pause.mockClear();
+    controller.prepareSection.mockClear();
     controller.navigateToChapter.mockClear();
     controller.start.mockClear();
 
-    vi.useFakeTimers({ shouldAdvanceTime: true });
-    vi.setSystemTime(new Date('2030-01-01T00:00:00Z'));
-
     await act(async () => {
       await eventDispatcher.dispatch('tts-audiobook-seek', {
         bookKey: 'book-1',
@@ -555,13 +517,10 @@ describe('useTTSControl tts-audiobook-seek cross-chapter behavior', () => {
       });
     });
 
-    // Cross-chapter navigation while paused would load a new audio source
-    // and then try to play() it from outside the user-gesture window —
-    // same iOS autoplay problem as the same-chapter case. Bail entirely;
-    // the user can tap Play first and then long-press.
+    expect(controller.pause).toHaveBeenCalled();
+    expect(controller.prepareSection).toHaveBeenCalledWith(2);
+    expect(mockAudiobookClient.cueToText).toHaveBeenCalledWith('the cathedral stood silent', 3);
     expect(controller.navigateToChapter).not.toHaveBeenCalled();
     expect(controller.start).not.toHaveBeenCalled();
-
-    vi.useRealTimers();
   });
 });

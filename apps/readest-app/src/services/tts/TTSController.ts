@@ -377,7 +377,7 @@ export class TTSController extends EventTarget {
           if (!plainText || marks.length === 0) {
             resolve();
             return await this.forward();
-          } else {
+          } else if (!this.ttsAudiobookClient?.initialized) {
             this.dispatchSpeakMark(marks[0]);
           }
           await this.preloadSSML(ssml, signal);
@@ -439,8 +439,9 @@ export class TTSController extends EventTarget {
 
   async start() {
     await this.initViewTTS();
-    const ssml = this.state.includes('paused') ? this.view.tts?.resume() : this.view.tts?.start();
-    if (this.state.includes('paused')) {
+    const isPausedState = this.state.includes('paused');
+    const ssml = isPausedState ? this.view.tts?.resume() : this.view.tts?.start();
+    if (isPausedState && !this.ttsAudiobookClient?.initialized) {
       this.resume();
     }
     this.#speak(ssml);
@@ -449,7 +450,16 @@ export class TTSController extends EventTarget {
 
   async pause() {
     this.state = 'paused';
-    if (!(await this.ttsClient.pause().catch((e) => this.error(e)))) {
+    const didPause = await this.ttsClient.pause().catch((e) => {
+      this.error(e);
+      return false;
+    });
+    if (this.ttsAudiobookClient?.initialized) {
+      await this.stop();
+      this.state = 'stop-paused';
+      return;
+    }
+    if (!didPause) {
       await this.stop();
       this.state = 'stop-paused';
     }
@@ -476,6 +486,10 @@ export class TTSController extends EventTarget {
       this.#currentSpeakPromise = null;
     }
     this.state = 'stopped';
+  }
+
+  async prepareSection(sectionIndex: number): Promise<boolean> {
+    return await this.#initTTSForSection(sectionIndex);
   }
 
   // goto previous mark/paragraph

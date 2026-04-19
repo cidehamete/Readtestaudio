@@ -539,11 +539,36 @@ export const useTTSControl = ({ bookKey, onRequestHidePanel }: UseTTSControlProp
     const existingController = ttsControllerRef.current;
     if (!existingController?.ttsAudiobookClient?.initialized || !seekText) return;
 
+    // iOS Safari autoplay policy: audio.play() only succeeds when invoked
+    // from a live user gesture. By the time this handler runs we are several
+    // awaits deep inside an async selectionchange chain — the gesture window
+    // has already closed. If the user had explicitly paused before the
+    // long-press, calling controller.start() (which calls audio.play()
+    // internally) is rejected with NotAllowedError. That error is swallowed
+    // by AudiobookTTSClient.resume()'s empty catch, leaving the app wedged:
+    // the long-press appears to do nothing.
+    //
+    // Behavior when paused: move audio.currentTime to the tapped word, but
+    // leave audio paused. The user's next Play tap is a real user gesture
+    // and resumes from the new position (speak()'s seek-align then emits
+    // the correct first mark). Cross-chapter while paused: bail entirely —
+    // loading a new chapter's audio src and play()ing it hits the same
+    // autoplay block, and there's no graceful "seek without play"
+    // equivalent across chapter boundaries.
+    const isPlaying = existingController.state === 'playing';
+
     // Cross-chapter path: the user tapped text in a section the audio is
     // not currently in. Jump chapters first (audiobook narrator restarts at
     // the top of the new chapter), then try a fine-grained in-chapter seek.
     const currentAudioSection = existingController.sectionIndex ?? -1;
     if (typeof sectionIndex === 'number' && sectionIndex !== currentAudioSection) {
+      if (!isPlaying) {
+        console.info(
+          '[TTS] audiobook cross-chapter seek skipped: audio is paused ' +
+            '(tap Play first, then long-press to seek)',
+        );
+        return;
+      }
       try {
         // Controller maps chapterIndex (1-based) to sectionIndex (0-based)
         // via chapterIndex - 1, so the inverse is sectionIndex + 1.
@@ -572,6 +597,12 @@ export const useTTSControl = ({ bookKey, onRequestHidePanel }: UseTTSControlProp
     // Same-chapter path: fine-grained word-level seek.
     const seeked = await existingController.ttsAudiobookClient.seekToText(seekText);
     if (seeked) {
+      if (!isPlaying) {
+        // audio.currentTime has already moved to the tapped word inside
+        // seekToText. Leave the player paused; the user's next Play tap
+        // resumes from the new position.
+        return;
+      }
       try {
         // Use pause (not stop) so that start() sees a 'paused' state and
         // routes to view.tts.resume() — which re-emits SSML for the CURRENT

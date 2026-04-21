@@ -673,6 +673,7 @@ export const useTTSControl = ({ bookKey, onRequestHidePanel }: UseTTSControlProp
       }
 
       const primaryLang = bookData.book.primaryLanguage;
+      const bookTitle = bookData.book?.title?.trim();
 
       if (ttsControllerRef.current) {
         ttsControllerRef.current.stop();
@@ -720,7 +721,7 @@ export const useTTSControl = ({ bookKey, onRequestHidePanel }: UseTTSControlProp
               .replace(/\s+/g, ' ')
               .trim(),
             progress.sectionLabel?.trim(),
-            bookData.book.title?.trim(),
+            bookTitle,
           ].find((text): text is string => !!text && text.length > 0);
 
           return fallbackText ? genSSMLRaw(fallbackText.slice(0, 1200)) : undefined;

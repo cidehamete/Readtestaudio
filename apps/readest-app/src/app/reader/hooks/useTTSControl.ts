@@ -650,7 +650,7 @@ export const useTTSControl = ({ bookKey, onRequestHidePanel }: UseTTSControlProp
         }
       }
 
-      if (!ttsFromIndex) {
+      if (ttsFromIndex === null || ttsFromIndex === undefined) {
         ttsFromIndex = progress.index;
       }
 
@@ -660,11 +660,15 @@ export const useTTSControl = ({ bookKey, onRequestHidePanel }: UseTTSControlProp
 
       const currentSection = view.renderer.getContents().find((x) => x.index === ttsFromIndex);
       if (ttsFromRange && currentSection) {
-        const ttsLocation = view.getCFI(currentSection?.index || 0, ttsFromRange);
-        viewSettings.ttsLocation = ttsLocation;
-        setViewSettings(bookKey, viewSettings);
-        if (isCfiInLocation(ttsLocation, location)) {
-          setShowBackToCurrentTTSLocation(false);
+        try {
+          const ttsLocation = view.getCFI(currentSection.index || 0, ttsFromRange);
+          viewSettings.ttsLocation = ttsLocation;
+          setViewSettings(bookKey, viewSettings);
+          if (isCfiInLocation(ttsLocation, location)) {
+            setShowBackToCurrentTTSLocation(false);
+          }
+        } catch (e) {
+          console.warn('[TTS] Failed to derive initial TTS CFI; continuing without it.', e);
         }
       }
 
@@ -703,16 +707,45 @@ export const useTTSControl = ({ bookKey, onRequestHidePanel }: UseTTSControlProp
         ttsController.sectionIndex = progress?.index ?? -1;
 
         await ttsController.init();
-        await ttsController.initViewTTS(ttsFromIndex);
+        const audiobookActive = ttsController.ttsAudiobookClient?.initialized === true;
         ttsController.updateHighlightOptions(
           getTTSHighlightOptions(viewSettings.ttsHighlightOptions, viewSettings.isEink),
         );
-        const ssml =
-          oneTime && ttsSpeakRange
-            ? genSSMLRaw(ttsSpeakRange.toString().trim())
-            : ttsFromRange
-              ? view.tts?.from(ttsFromRange)
-              : view.tts?.start();
+
+        const buildAudiobookFallbackSSML = () => {
+          const fallbackText = [
+            ttsSpeakRange?.toString().trim(),
+            ttsFromRange?.toString().trim(),
+            (currentSection?.doc?.body?.innerText || currentSection?.doc?.body?.textContent || '')
+              .replace(/\s+/g, ' ')
+              .trim(),
+            progress.sectionLabel?.trim(),
+            bookData.book.title?.trim(),
+          ].find((text): text is string => !!text && text.length > 0);
+
+          return fallbackText ? genSSMLRaw(fallbackText.slice(0, 1200)) : undefined;
+        };
+
+        let ssml: string | undefined;
+        try {
+          await ttsController.initViewTTS(ttsFromIndex ?? undefined);
+          ssml =
+            oneTime && ttsSpeakRange
+              ? genSSMLRaw(ttsSpeakRange.toString().trim())
+              : ttsFromRange
+                ? view.tts?.from(ttsFromRange)
+                : view.tts?.start();
+        } catch (e) {
+          if (!audiobookActive) {
+            throw e;
+          }
+          console.warn(
+            '[TTS] View TTS init failed in audiobook mode; falling back to raw text.',
+            e,
+          );
+          ssml = buildAudiobookFallbackSSML();
+        }
+
         if (ssml) {
           const lang = parseSSMLLang(ssml, primaryLang) || 'en';
           setIsPlaying(true);

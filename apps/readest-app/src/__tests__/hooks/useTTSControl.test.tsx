@@ -113,6 +113,7 @@ const pendingInitResolvers: Array<() => void> = [];
 // Capture listeners the hook registers on the controller so tests can fire
 // controller-emitted events (e.g. 'tts-highlight-mark') directly.
 const controllerListeners: Record<string, ((e: Event) => void)[]> = {};
+let initViewTTSError: Error | null = null;
 // Test-mutable audiobook-active flag surfaced on the mock controller.
 // Includes seekToText so the audiobook-seek handler can call it.
 const mockAudiobookClient = {
@@ -130,7 +131,9 @@ vi.mock('@/services/tts', () => ({
             pendingInitResolvers.push(() => resolve());
           }),
       ),
-      initViewTTS: vi.fn().mockResolvedValue(undefined),
+      initViewTTS: vi.fn().mockImplementation(async () => {
+        if (initViewTTSError) throw initViewTTSError;
+      }),
       prepareSection: vi.fn().mockResolvedValue(true),
       updateHighlightOptions: vi.fn(),
       setLang: vi.fn(),
@@ -232,11 +235,15 @@ describe('useTTSControl concurrent tts-speak events', () => {
     ttsControllerInstances.length = 0;
     pendingInitResolvers.length = 0;
     for (const key of Object.keys(controllerListeners)) delete controllerListeners[key];
+    initViewTTSError = null;
+    mockProgress.sectionLabel = '';
+    document.body.innerHTML = '';
     mockAudiobookClient.initialized = false;
     mockView.resolveNavigation.mockClear();
     mockView.renderer.goTo.mockClear();
     mockView.renderer.scrollToAnchor.mockClear();
     mockView.resolveCFI.mockReturnValue({ index: 0, anchor: () => new Range() });
+    mockView.getCFI.mockReturnValue('cfi');
   });
 
   afterEach(() => {
@@ -275,11 +282,15 @@ describe('useTTSControl audio-as-leader behavior (audiobook)', () => {
     ttsControllerInstances.length = 0;
     pendingInitResolvers.length = 0;
     for (const key of Object.keys(controllerListeners)) delete controllerListeners[key];
+    initViewTTSError = null;
+    mockProgress.sectionLabel = '';
+    document.body.innerHTML = '';
     mockAudiobookClient.initialized = true;
     mockView.resolveNavigation.mockClear();
     mockView.renderer.goTo.mockClear();
     mockView.renderer.scrollToAnchor.mockClear();
     mockView.resolveCFI.mockReturnValue({ index: 0, anchor: () => new Range() });
+    mockView.getCFI.mockReturnValue('cfi');
   });
 
   afterEach(() => {
@@ -321,6 +332,44 @@ describe('useTTSControl audio-as-leader behavior (audiobook)', () => {
     expect(mockView.resolveNavigation).toHaveBeenCalledWith(1);
     expect(mockView.renderer.goTo).toHaveBeenCalled();
   });
+
+  it('keeps audiobook startup alive when deriving the initial CFI throws', async () => {
+    render(<Harness />);
+    mockView.getCFI.mockImplementationOnce(() => {
+      throw new Error('bad range');
+    });
+
+    await act(async () => {
+      await startAndAwait();
+    });
+
+    const controller = ttsControllerInstances[0] as {
+      speak: ReturnType<typeof vi.fn>;
+    };
+    expect(controller.speak).toHaveBeenCalled();
+  });
+
+  it('falls back to raw text startup when view TTS init fails in audiobook mode', async () => {
+    render(<Harness />);
+    initViewTTSError = new Error('tts init exploded');
+    mockProgress.sectionLabel = 'One';
+    document.body.innerHTML = '<p>Fallback page text for audiobook startup.</p>';
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    await act(async () => {
+      await startAndAwait();
+    });
+
+    const controller = ttsControllerInstances[0] as {
+      speak: ReturnType<typeof vi.fn>;
+    };
+    expect(controller.speak).toHaveBeenCalledWith(
+      '<speak>Fallback page text for audiobook startup.</speak>',
+      false,
+      expect.any(Function),
+    );
+    warnSpy.mockRestore();
+  });
 });
 
 describe('useTTSControl tts-audiobook-seek cross-chapter behavior', () => {
@@ -328,6 +377,9 @@ describe('useTTSControl tts-audiobook-seek cross-chapter behavior', () => {
     ttsControllerInstances.length = 0;
     pendingInitResolvers.length = 0;
     for (const key of Object.keys(controllerListeners)) delete controllerListeners[key];
+    initViewTTSError = null;
+    mockProgress.sectionLabel = '';
+    document.body.innerHTML = '';
     mockAudiobookClient.initialized = true;
     mockAudiobookClient.seekToText.mockClear();
     mockAudiobookClient.seekToText.mockResolvedValue(true);
@@ -336,6 +388,7 @@ describe('useTTSControl tts-audiobook-seek cross-chapter behavior', () => {
     mockView.resolveNavigation.mockClear();
     mockView.renderer.goTo.mockClear();
     mockView.resolveCFI.mockReturnValue({ index: 0, anchor: () => new Range() });
+    mockView.getCFI.mockReturnValue('cfi');
   });
 
   afterEach(() => {

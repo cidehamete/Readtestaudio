@@ -580,12 +580,7 @@ export const useTTSControl = ({ bookKey, onRequestHidePanel }: UseTTSControlProp
 
       await syncAudiobookCursorToSelection(targetSectionIndex, range, cfi);
 
-      await existingController.ttsAudiobookClient.cueToText(
-        seekText,
-        typeof targetSectionIndex === 'number' && targetSectionIndex >= 0
-          ? targetSectionIndex + 1
-          : undefined,
-      );
+      await existingController.ttsAudiobookClient.cueToText(seekText);
     } catch (e) {
       console.warn('[TTS] audiobook word-seek cue failed:', e);
     }

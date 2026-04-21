@@ -53,6 +53,13 @@ interface CachedChapterTimestamps {
   normalizedWords: string[];
 }
 
+interface AudiobookTextMatch {
+  chapter: AudiobookChapter;
+  timestamps: CachedChapterTimestamps;
+  matchWordIndex: number;
+  targetTime: number;
+}
+
 interface AudiobookChapter {
   index: number;
   title: string;
@@ -162,13 +169,7 @@ export class AudiobookTTSClient implements TTSClient {
       .trim();
   }
 
-  /**
-   * Find the manifest chapter matching the current EPUB section label.
-   * Three tiers:
-   *  1. Exact case-insensitive match.
-   *  2. Normalized match (strip numbering, punctuation).
-   *  3. Position-based fallback using the EPUB section index.
-   */
+  /** Find the manifest chapter matching the current EPUB section label. */
   #findChapter(sectionLabel: string): AudiobookChapter | null {
     if (!this.#manifest || !sectionLabel) return null;
     const label = sectionLabel.trim().toLowerCase();
@@ -184,12 +185,6 @@ export class AudiobookTTSClient implements TTSClient {
         (c) => this.#normalizeForMatch(c.title) === normLabel,
       );
       if (normalized) return normalized;
-    }
-
-    // Tier 3: position fallback — use EPUB section index to pick the manifest chapter
-    const sectionIndex = this.controller?.sectionIndex ?? -1;
-    if (sectionIndex >= 0 && sectionIndex < this.#manifest.chapters.length) {
-      return this.#manifest.chapters[sectionIndex] ?? null;
     }
 
     return null;
@@ -240,6 +235,111 @@ export class AudiobookTTSClient implements TTSClient {
       matches.push(i);
     }
     return matches;
+  }
+
+  #findBestKeywordMatch(
+    keyWords: string[],
+    timestamps: CachedChapterTimestamps,
+    preferNearest = false,
+  ): number | null {
+    const matches = this.#findKeywordMatches(keyWords, timestamps.normalizedWords);
+    if (matches.length === 0) return null;
+    if (!preferNearest || !this.#audioEl) {
+      return matches[0] ?? null;
+    }
+
+    const now = this.#audioEl.currentTime;
+    return matches.reduce((closest, candidate) => {
+      const closestDistance = Math.abs((timestamps.data.words[closest]?.start ?? 0) - now);
+      const candidateDistance = Math.abs((timestamps.data.words[candidate]?.start ?? 0) - now);
+      return candidateDistance < closestDistance ? candidate : closest;
+    }, matches[0]!);
+  }
+
+  #getApproximateChapterIndexFromSection(): number | null {
+    if (!this.#manifest || !this.controller) return null;
+
+    const sectionIndex = this.controller.sectionIndex;
+    const totalSections = this.controller.view?.book?.sections?.length ?? 0;
+    if (sectionIndex < 0 || totalSections <= 1 || this.#manifest.chapters.length === 0) {
+      return null;
+    }
+
+    const approxPosition =
+      (sectionIndex / Math.max(1, totalSections - 1)) * (this.#manifest.chapters.length - 1);
+    return this.#manifest.chapters[Math.round(approxPosition)]?.index ?? null;
+  }
+
+  #getChapterSearchOrder(preferredChapterIndex?: number, sectionLabel = ''): AudiobookChapter[] {
+    if (!this.#manifest) return [];
+
+    const chapters: AudiobookChapter[] = [];
+    const seen = new Set<number>();
+    const add = (chapter: AudiobookChapter | null) => {
+      if (!chapter || seen.has(chapter.index)) return;
+      seen.add(chapter.index);
+      chapters.push(chapter);
+    };
+
+    add(this.#findChapterByIndex(preferredChapterIndex ?? -1));
+    add(this.#findChapterByIndex(this.#currentChapterIndex));
+
+    const currentChapterIndex = this.#currentChapterIndex;
+    if (currentChapterIndex > 0) {
+      for (let delta = 1; delta <= 2; delta++) {
+        add(this.#findChapterByIndex(currentChapterIndex + delta));
+        add(this.#findChapterByIndex(currentChapterIndex - delta));
+      }
+    }
+
+    add(this.#findChapter(sectionLabel));
+
+    const approximateChapterIndex = this.#getApproximateChapterIndexFromSection();
+    add(this.#findChapterByIndex(approximateChapterIndex ?? -1));
+    if (approximateChapterIndex !== null) {
+      for (let delta = 1; delta <= 2; delta++) {
+        add(this.#findChapterByIndex(approximateChapterIndex + delta));
+        add(this.#findChapterByIndex(approximateChapterIndex - delta));
+      }
+    }
+
+    for (const chapter of this.#manifest.chapters) {
+      add(chapter);
+    }
+
+    return chapters;
+  }
+
+  async #locateTextMatch(
+    text: string,
+    options: { preferredChapterIndex?: number; sectionLabel?: string } = {},
+  ): Promise<AudiobookTextMatch | null> {
+    if (!this.#manifest) return null;
+
+    const keyWords = this.#extractKeywords(text, 2, 6);
+    if (keyWords.length === 0) return null;
+
+    const { preferredChapterIndex, sectionLabel = '' } = options;
+    const chapters = this.#getChapterSearchOrder(preferredChapterIndex, sectionLabel);
+
+    for (const chapter of chapters) {
+      const timestamps = await this.#loadTimestamps(chapter.timestamps_url);
+      if (!timestamps || timestamps.data.words.length === 0) continue;
+
+      const matchWordIndex = this.#findBestKeywordMatch(
+        keyWords,
+        timestamps,
+        chapter.index === this.#currentChapterIndex,
+      );
+      if (matchWordIndex === null) continue;
+
+      const targetTime = timestamps.data.words[matchWordIndex]?.start;
+      if (targetTime === undefined) continue;
+
+      return { chapter, timestamps, matchWordIndex, targetTime };
+    }
+
+    return null;
   }
 
   async #loadTimestamps(url: string): Promise<CachedChapterTimestamps | null> {
@@ -576,8 +676,27 @@ export class AudiobookTTSClient implements TTSClient {
       return;
     }
 
+    const { marks } = parseSSMLMarks(ssml, this.#primaryLang);
+    if (marks.length === 0) {
+      yield { code: 'end' } as TTSMessageEvent;
+      return;
+    }
+
     const sectionLabel = this.controller?.sectionLabel ?? '';
-    const chapter = this.#findChapter(sectionLabel);
+    const firstMarkText = marks[0]?.text.trim() ?? '';
+    const resolvedTextMatch =
+      firstMarkText.length > 0
+        ? await this.#locateTextMatch(firstMarkText, {
+            preferredChapterIndex:
+              this.#currentChapterIndex > 0 ? this.#currentChapterIndex : undefined,
+            sectionLabel,
+          })
+        : null;
+
+    const chapter =
+      resolvedTextMatch?.chapter ??
+      this.#findChapterByIndex(this.#currentChapterIndex) ??
+      this.#findChapter(sectionLabel);
 
     if (!chapter) {
       console.info(`[AudiobookTTSClient] No chapter matched "${sectionLabel}" — skipping`);
@@ -588,14 +707,11 @@ export class AudiobookTTSClient implements TTSClient {
       return;
     }
 
-    const timestamps = await this.#loadTimestamps(chapter.timestamps_url);
+    const timestamps =
+      resolvedTextMatch?.chapter.index === chapter.index
+        ? resolvedTextMatch.timestamps
+        : await this.#loadTimestamps(chapter.timestamps_url);
     if (!timestamps || timestamps.data.words.length === 0) {
-      yield { code: 'end' } as TTSMessageEvent;
-      return;
-    }
-
-    const { marks } = parseSSMLMarks(ssml, this.#primaryLang);
-    if (marks.length === 0) {
       yield { code: 'end' } as TTSMessageEvent;
       return;
     }
@@ -610,11 +726,13 @@ export class AudiobookTTSClient implements TTSClient {
       const savedPos = this.#loadPosition(chapter.index);
       if (savedPos > 0) {
         this.#setAudioTime(savedPos);
+      } else if (resolvedTextMatch?.chapter.index === chapter.index) {
+        this.#setAudioTime(resolvedTextMatch.targetTime);
       } else if (marks.length > 0) {
         // No saved position — seek to the first mark's text so the audio
         // starts at the current page rather than from the chapter beginning.
-        const firstMarkText = marks[0]!.text.trim().split(/\s+/).slice(0, 6).join(' ');
-        await this.#seekToPageStart(firstMarkText, timestamps);
+        const chapterStartText = marks[0]!.text.trim().split(/\s+/).slice(0, 10).join(' ');
+        await this.#seekToPageStart(chapterStartText, timestamps);
       }
     }
 
@@ -853,23 +971,23 @@ export class AudiobookTTSClient implements TTSClient {
 
   async cueToText(text: string, chapterIndex?: number): Promise<boolean> {
     if (!this.#manifest || !this.#audioEl) return false;
-    const chapter = chapterIndex
-      ? this.#findChapterByIndex(chapterIndex)
-      : this.#findChapterByIndex(this.#currentChapterIndex);
-    if (!chapter) return false;
+    const match = await this.#locateTextMatch(text, {
+      preferredChapterIndex:
+        chapterIndex ?? (this.#currentChapterIndex > 0 ? this.#currentChapterIndex : undefined),
+      sectionLabel: this.controller?.sectionLabel ?? '',
+    });
 
-    await this.#setActiveChapter(chapter);
-    const timestamps = await this.#loadTimestamps(chapter.timestamps_url);
-    if (!timestamps) return false;
-
-    const didSeek = this.#seekWithinChapterText(text, timestamps, false);
-    if (!didSeek && this.#currentChapterIndex === chapter.index) {
+    if (!match) {
       this.#dispatchCurrentTime(true);
+      return false;
     }
+
+    await this.#setActiveChapter(match.chapter);
+    this.#setAudioTime(match.targetTime);
     this.#audioEl.pause();
     this.#savePosition();
     this.#dispatchCurrentTime(true);
-    return didSeek;
+    return true;
   }
 
   // ── Settings ─────────────────────────────────────────────────────────────────

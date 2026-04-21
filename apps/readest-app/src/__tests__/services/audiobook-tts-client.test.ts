@@ -147,13 +147,97 @@ const FAKE_TIMESTAMPS = {
   ]),
 };
 
-function installFetchMock() {
+const MULTI_SECTION_MANIFEST = {
+  title: 'Big Section Book',
+  slug: 'big-section-book',
+  voice_id: 'v1',
+  voice_name: 'Tester',
+  generated_at: '2026-01-01T00:00:00Z',
+  total_chapters: 3,
+  chapters: [
+    {
+      index: 1,
+      title: 'Front Matter',
+      audio_url: 'https://example.com/audio/chapter_01.mp3',
+      timestamps_url: 'https://example.com/ts/chapter_01.json',
+      word_count: 4,
+      duration_seconds: 4,
+    },
+    {
+      index: 2,
+      title: 'Narrative A',
+      audio_url: 'https://example.com/audio/chapter_02.mp3',
+      timestamps_url: 'https://example.com/ts/chapter_02.json',
+      word_count: 9,
+      duration_seconds: 9,
+    },
+    {
+      index: 3,
+      title: 'Narrative B',
+      audio_url: 'https://example.com/audio/chapter_03.mp3',
+      timestamps_url: 'https://example.com/ts/chapter_03.json',
+      word_count: 11,
+      duration_seconds: 11,
+    },
+  ],
+};
+
+const MULTI_SECTION_TIMESTAMPS: Record<string, unknown> = {
+  'https://example.com/ts/chapter_01.json': {
+    chapter: 1,
+    title: 'Front Matter',
+    duration_seconds: 4,
+    words: makeWords(['copyright', 'page', 'only', 'here']),
+  },
+  'https://example.com/ts/chapter_02.json': {
+    chapter: 2,
+    title: 'Narrative A',
+    duration_seconds: 9,
+    words: makeWords([
+      'Sevi',
+      'stood',
+      'on',
+      'Milwaukee',
+      'Avenue',
+      'in',
+      'Wicker',
+      'Park',
+      'today',
+    ]),
+  },
+  'https://example.com/ts/chapter_03.json': {
+    chapter: 3,
+    title: 'Narrative B',
+    duration_seconds: 11,
+    words: makeWords([
+      'Earlier',
+      'that',
+      'morning',
+      'Eason',
+      'Wallace',
+      'was',
+      'brushing',
+      'his',
+      'bottom',
+      'left',
+      'molar',
+    ]),
+  },
+};
+
+function installFetchMock(
+  manifest: typeof FAKE_MANIFEST = FAKE_MANIFEST,
+  timestampsByUrl: Record<string, unknown> = {
+    [FAKE_MANIFEST.chapters[0]!.timestamps_url]: FAKE_TIMESTAMPS,
+  },
+) {
   const fetchMock = vi.fn(async (url: string) => {
     if (url.endsWith('manifest.json') || url.endsWith('manifest')) {
-      return new Response(JSON.stringify(FAKE_MANIFEST), { status: 200 });
+      return new Response(JSON.stringify(manifest), { status: 200 });
     }
-    if (url.includes('timestamps') || url.endsWith('.json')) {
-      return new Response(JSON.stringify(FAKE_TIMESTAMPS), { status: 200 });
+    const timestamps = timestampsByUrl[url];
+    if (timestamps) {
+      return new Response(JSON.stringify(timestamps), { status: 200 });
     }
     return new Response('', { status: 404 });
   });
@@ -193,6 +277,11 @@ const SSML_TWO_SENTENCES =
 const SSML_SHORT_WORDS =
   '<speak xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="en">' +
   '<mark name="0"/>I am a happy little camper today.' +
+  '</speak>';
+
+const SSML_MULTI_SECTION_A =
+  '<speak xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="en">' +
+  '<mark name="0"/>Sevi stood on Milwaukee Avenue in Wicker Park today.' +
   '</speak>';
 
 // ---- Helper: drain a speak() iterator with a timeout ------------------------
@@ -419,4 +508,49 @@ describe('AudiobookTTSClient sync behavior', () => {
     // Still exactly one mark dispatched across the whole speak().
     expect(dispatchSpy).toHaveBeenCalledTimes(1);
   }, 10_000);
+
+  test('resolves the active audiobook chapter from page text when an EPUB section spans many generated chapters', async () => {
+    installFetchMock(MULTI_SECTION_MANIFEST, MULTI_SECTION_TIMESTAMPS);
+    const ctl = makeController('Chapter 1');
+    ctl.sectionIndex = 0;
+    const dispatchSpy = ctl.dispatchSpeakMark as unknown as ReturnType<typeof vi.fn>;
+    const client = new AudiobookTTSClient(ctl, 'https://example.com/manifest.json');
+    await client.init();
+    const audio = lastAudio!;
+
+    const abort = new AbortController();
+    const iter = client.speak(SSML_MULTI_SECTION_A, abort.signal)[Symbol.asyncIterator]();
+
+    const first = await iter.next();
+    expect(first.done).toBe(false);
+    expect(audio.src).toBe(MULTI_SECTION_MANIFEST.chapters[1]!.audio_url);
+    expect(audio.currentTime).toBe(0);
+    expect(dispatchSpy).toHaveBeenCalledTimes(1);
+
+    audio.advanceTo(20);
+    const remainingCodes: string[] = [];
+    for (;;) {
+      const r = await iter.next();
+      if (r.done) break;
+      remainingCodes.push(r.value.code);
+      if (r.value.code === 'end') break;
+    }
+    expect(remainingCodes.at(-1)).toBe('end');
+  }, 10_000);
+
+  test('cueToText can jump to the correct generated chapter even when the provided chapter hint is wrong', async () => {
+    installFetchMock(MULTI_SECTION_MANIFEST, MULTI_SECTION_TIMESTAMPS);
+    const ctl = makeController('Chapter 1');
+    ctl.sectionIndex = 0;
+    const client = new AudiobookTTSClient(ctl, 'https://example.com/manifest.json');
+    await client.init();
+    const audio = lastAudio!;
+
+    const ok = await client.cueToText('Eason Wallace was brushing his bottom left molar', 1);
+
+    expect(ok).toBe(true);
+    expect(audio.src).toBe(MULTI_SECTION_MANIFEST.chapters[2]!.audio_url);
+    expect(audio.currentTime).toBe(3);
+    expect(audio.paused).toBe(true);
+  });
 });

@@ -378,7 +378,7 @@ describe('useTTSControl tts-audiobook-seek cross-chapter behavior', () => {
 
     expect(controller.pause).toHaveBeenCalled();
     expect(controller.prepareSection).toHaveBeenCalledWith(2);
-    expect(mockAudiobookClient.cueToText).toHaveBeenCalledWith('the cathedral stood silent', 3);
+    expect(mockAudiobookClient.cueToText).toHaveBeenCalledWith('the cathedral stood silent');
     expect(controller.navigateToChapter).not.toHaveBeenCalled();
     expect(controller.start).not.toHaveBeenCalled();
   });
@@ -411,7 +411,7 @@ describe('useTTSControl tts-audiobook-seek cross-chapter behavior', () => {
     expect(controller.pause).toHaveBeenCalled();
     expect(controller.prepareSection).toHaveBeenCalledWith(2);
     expect(controller.navigateToChapter).not.toHaveBeenCalled();
-    expect(mockAudiobookClient.cueToText).toHaveBeenCalledWith('the cathedral stood silent', 3);
+    expect(mockAudiobookClient.cueToText).toHaveBeenCalledWith('the cathedral stood silent');
     expect(controller.start).not.toHaveBeenCalled();
   });
 
@@ -448,7 +448,7 @@ describe('useTTSControl tts-audiobook-seek cross-chapter behavior', () => {
     expect(controller.stop).not.toHaveBeenCalled();
     expect(controller.pause).toHaveBeenCalled();
     expect(controller.prepareSection).toHaveBeenCalledWith(2);
-    expect(mockAudiobookClient.cueToText).toHaveBeenCalledWith('the cathedral stood silent', 3);
+    expect(mockAudiobookClient.cueToText).toHaveBeenCalledWith('the cathedral stood silent');
     expect(controller.start).not.toHaveBeenCalled();
   });
 
@@ -484,7 +484,7 @@ describe('useTTSControl tts-audiobook-seek cross-chapter behavior', () => {
 
     expect(controller.pause).toHaveBeenCalled();
     expect(controller.prepareSection).toHaveBeenCalledWith(2);
-    expect(mockAudiobookClient.cueToText).toHaveBeenCalledWith('the cathedral stood silent', 3);
+    expect(mockAudiobookClient.cueToText).toHaveBeenCalledWith('the cathedral stood silent');
     expect(controller.start).not.toHaveBeenCalled();
   });
 
@@ -519,7 +519,7 @@ describe('useTTSControl tts-audiobook-seek cross-chapter behavior', () => {
 
     expect(controller.pause).toHaveBeenCalled();
     expect(controller.prepareSection).toHaveBeenCalledWith(2);
-    expect(mockAudiobookClient.cueToText).toHaveBeenCalledWith('the cathedral stood silent', 3);
+    expect(mockAudiobookClient.cueToText).toHaveBeenCalledWith('the cathedral stood silent');
     expect(controller.navigateToChapter).not.toHaveBeenCalled();
     expect(controller.start).not.toHaveBeenCalled();
   });

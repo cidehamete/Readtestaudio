@@ -63,10 +63,20 @@ interface AudiobookTextMatch {
 interface AudiobookChapter {
   index: number;
   title: string;
+  normalized_title?: string;
   audio_url: string;
   timestamps_url: string;
   word_count: number;
   duration_seconds: number;
+  section_type?: string;
+  source_spine_index?: number;
+  source_href?: string;
+  source_item_id?: string;
+  source_title?: string;
+  chunk_index_in_source?: number;
+  chunks_in_source?: number;
+  first_words?: string;
+  last_words?: string;
 }
 
 interface AudiobookManifest {
@@ -202,6 +212,54 @@ export class AudiobookTTSClient implements TTSClient {
       .trim();
   }
 
+  #normalizeHref(href: string): string {
+    return decodeURIComponent(href)
+      .split('#')[0]!
+      .replace(/^[./]+/, '')
+      .replace(/\\/g, '/')
+      .toLowerCase();
+  }
+
+  #hrefsMatch(a?: string, b?: string): boolean {
+    if (!a || !b) return false;
+    const left = this.#normalizeHref(a);
+    const right = this.#normalizeHref(b);
+    return left === right || left.endsWith(`/${right}`) || right.endsWith(`/${left}`);
+  }
+
+  #getSourceMatchedChapters(): AudiobookChapter[] {
+    if (!this.#manifest || !this.controller) return [];
+
+    const seen = new Set<number>();
+    const matches: AudiobookChapter[] = [];
+    const add = (chapter: AudiobookChapter | null | undefined) => {
+      if (!chapter || seen.has(chapter.index)) return;
+      seen.add(chapter.index);
+      matches.push(chapter);
+    };
+
+    const sectionIndex = this.controller.sectionIndex;
+    const sectionHref = this.controller.view?.book?.sections?.[sectionIndex]?.href;
+
+    if (sectionHref) {
+      for (const chapter of this.#manifest.chapters) {
+        if (this.#hrefsMatch(chapter.source_href, sectionHref)) {
+          add(chapter);
+        }
+      }
+    }
+
+    if (sectionIndex >= 0) {
+      for (const chapter of this.#manifest.chapters) {
+        if (chapter.source_spine_index === sectionIndex) {
+          add(chapter);
+        }
+      }
+    }
+
+    return matches;
+  }
+
   #extractKeywords(text: string, minLength = 2, maxKeywords = 4): string[] {
     return this.#normalizeWord(text)
       .split(/\s+/)
@@ -283,6 +341,9 @@ export class AudiobookTTSClient implements TTSClient {
 
     add(this.#findChapterByIndex(preferredChapterIndex ?? -1));
     add(this.#findChapterByIndex(this.#currentChapterIndex));
+    for (const chapter of this.#getSourceMatchedChapters()) {
+      add(chapter);
+    }
 
     const currentChapterIndex = this.#currentChapterIndex;
     if (currentChapterIndex > 0) {
@@ -695,6 +756,7 @@ export class AudiobookTTSClient implements TTSClient {
 
     const chapter =
       resolvedTextMatch?.chapter ??
+      this.#getSourceMatchedChapters()[0] ??
       this.#findChapterByIndex(this.#currentChapterIndex) ??
       this.#findChapter(sectionLabel);
 

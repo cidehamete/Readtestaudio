@@ -225,6 +225,52 @@ const MULTI_SECTION_TIMESTAMPS: Record<string, unknown> = {
   },
 };
 
+const SOURCE_MAPPED_MANIFEST = {
+  title: 'Source Mapped Book',
+  slug: 'source-mapped-book',
+  voice_id: 'v1',
+  voice_name: 'Tester',
+  generated_at: '2026-01-01T00:00:00Z',
+  total_chapters: 2,
+  chapters: [
+    {
+      index: 1,
+      title: 'Chapter 1',
+      audio_url: 'https://example.com/audio/chapter_01.mp3',
+      timestamps_url: 'https://example.com/ts/source_01.json',
+      word_count: 4,
+      duration_seconds: 4,
+      source_spine_index: 6,
+      source_href: 'OEBPS/xhtml/chapter1_split_000.xhtml',
+    },
+    {
+      index: 2,
+      title: 'Chapter 2',
+      audio_url: 'https://example.com/audio/chapter_02.mp3',
+      timestamps_url: 'https://example.com/ts/source_02.json',
+      word_count: 5,
+      duration_seconds: 5,
+      source_spine_index: 7,
+      source_href: 'OEBPS/xhtml/chapter1_split_001.xhtml',
+    },
+  ],
+};
+
+const SOURCE_MAPPED_TIMESTAMPS: Record<string, unknown> = {
+  'https://example.com/ts/source_01.json': {
+    chapter: 1,
+    title: 'Chapter 1',
+    duration_seconds: 4,
+    words: makeWords(['earlier', 'chapter', 'opening', 'words']),
+  },
+  'https://example.com/ts/source_02.json': {
+    chapter: 2,
+    title: 'Chapter 2',
+    duration_seconds: 5,
+    words: makeWords(['unknown', 'fallback', 'page', 'alignment', 'works']),
+  },
+};
+
 function installFetchMock(
   manifest: typeof FAKE_MANIFEST = FAKE_MANIFEST,
   timestampsByUrl: Record<string, unknown> = {
@@ -247,11 +293,22 @@ function installFetchMock(
 
 // ---- Fake controller --------------------------------------------------------
 
-function makeController(sectionLabel = 'Chapter 1'): TTSController {
+function makeController(
+  sectionLabel = 'Chapter 1',
+  options: { sectionIndex?: number; sectionHref?: string } = {},
+): TTSController {
+  const { sectionIndex = 0, sectionHref = 'OEBPS/xhtml/chapter1_split_000.xhtml' } = options;
   const target = new EventTarget();
   const controller = {
     sectionLabel,
-    sectionIndex: 0,
+    sectionIndex,
+    view: {
+      book: {
+        sections: Array.from({ length: Math.max(sectionIndex + 1, 8) }, (_, index) => ({
+          href: index === sectionIndex ? sectionHref : `section-${index}.xhtml`,
+        })),
+      },
+    },
     dispatchEvent: (e: Event) => target.dispatchEvent(e),
     dispatchSpeakMark: vi.fn(),
     addEventListener: target.addEventListener.bind(target),
@@ -552,5 +609,39 @@ describe('AudiobookTTSClient sync behavior', () => {
     expect(audio.src).toBe(MULTI_SECTION_MANIFEST.chapters[2]!.audio_url);
     expect(audio.currentTime).toBe(3);
     expect(audio.paused).toBe(true);
+  });
+
+  test('falls back to exact source spine metadata before fuzzy chapter guessing', async () => {
+    installFetchMock(SOURCE_MAPPED_MANIFEST, SOURCE_MAPPED_TIMESTAMPS);
+    const ctl = makeController('', {
+      sectionIndex: 7,
+      sectionHref: 'OEBPS/xhtml/chapter1_split_001.xhtml',
+    });
+    const client = new AudiobookTTSClient(ctl, 'https://example.com/manifest.json');
+    await client.init();
+    const audio = lastAudio!;
+
+    const abort = new AbortController();
+    const iter = client
+      .speak(
+        '<speak xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="en">' +
+          '<mark name="0"/>Unmatchable placeholder sentence.</speak>',
+        abort.signal,
+      )
+      [Symbol.asyncIterator]();
+
+    const first = await iter.next();
+    expect(first.done).toBe(false);
+    expect(audio.src).toBe(SOURCE_MAPPED_MANIFEST.chapters[1]!.audio_url);
+
+    audio.advanceTo(10);
+    const remainingCodes: string[] = [];
+    for (;;) {
+      const r = await iter.next();
+      if (r.done) break;
+      remainingCodes.push(r.value.code);
+      if (r.value.code === 'end') break;
+    }
+    expect(remainingCodes.at(-1)).toBe('end');
   });
 });

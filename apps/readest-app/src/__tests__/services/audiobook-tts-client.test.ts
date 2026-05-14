@@ -271,6 +271,49 @@ const SOURCE_MAPPED_TIMESTAMPS: Record<string, unknown> = {
   },
 };
 
+// A manifest where a single audiobook chapter spans MULTIPLE EPUB spine
+// entries (so its source_spine_indexes / source_hrefs are arrays). Matching
+// must succeed when the controller is positioned at any of those indexes/
+// hrefs, not just the primary source_spine_index / source_href.
+const MULTI_SOURCE_MAPPED_MANIFEST = {
+  schema_version: 2,
+  title: 'Multi-Source Book',
+  slug: 'multi-source-book',
+  voice_id: 'v1',
+  voice_name: 'Tester',
+  generated_at: '2026-01-01T00:00:00Z',
+  total_chapters: 1,
+  chapters: [
+    {
+      index: 1,
+      title: 'Big Chapter',
+      audio_url: 'https://example.com/audio/big_chapter.mp3',
+      timestamps_url: 'https://example.com/ts/big_chapter.json',
+      word_count: 4,
+      duration_seconds: 4,
+      // Primary single-value source fields do NOT match the controller's
+      // position. Only the array fields do.
+      source_spine_index: 3,
+      source_href: 'OEBPS/xhtml/primary_only.xhtml',
+      source_spine_indexes: [3, 4, 5, 6, 7],
+      source_hrefs: [
+        'OEBPS/xhtml/primary_only.xhtml',
+        'OEBPS/xhtml/extra_section_a.xhtml',
+        'OEBPS/xhtml/extra_section_b.xhtml',
+      ],
+    },
+  ],
+};
+
+const MULTI_SOURCE_MAPPED_TIMESTAMPS: Record<string, unknown> = {
+  'https://example.com/ts/big_chapter.json': {
+    chapter: 1,
+    title: 'Big Chapter',
+    duration_seconds: 4,
+    words: makeWords(['big', 'chapter', 'opening', 'words']),
+  },
+};
+
 function installFetchMock(
   manifest: typeof FAKE_MANIFEST = FAKE_MANIFEST,
   timestampsByUrl: Record<string, unknown> = {
@@ -643,5 +686,76 @@ describe('AudiobookTTSClient sync behavior', () => {
       if (r.value.code === 'end') break;
     }
     expect(remainingCodes.at(-1)).toBe('end');
+  });
+
+  // When the audiobook generator collapses several EPUB sections into one
+  // narrated chapter, the manifest carries arrays of source identifiers
+  // (source_spine_indexes / source_hrefs) on top of the single-value
+  // legacy fields. Matching must check the arrays too — otherwise a reader
+  // who lands inside one of the "extra" sections finds no audiobook chapter
+  // attached to it and the page falls silent.
+  test('matches by source_hrefs array when the active section is not the primary href', async () => {
+    installFetchMock(MULTI_SOURCE_MAPPED_MANIFEST, MULTI_SOURCE_MAPPED_TIMESTAMPS);
+    const ctl = makeController('', {
+      sectionIndex: 5,
+      sectionHref: 'OEBPS/xhtml/extra_section_a.xhtml',
+    });
+    const client = new AudiobookTTSClient(ctl, 'https://example.com/manifest.json');
+    await client.init();
+    const audio = lastAudio!;
+
+    const abort = new AbortController();
+    const iter = client
+      .speak(
+        '<speak xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="en">' +
+          '<mark name="0"/>Unmatchable placeholder sentence.</speak>',
+        abort.signal,
+      )
+      [Symbol.asyncIterator]();
+
+    const first = await iter.next();
+    expect(first.done).toBe(false);
+    expect(audio.src).toBe(MULTI_SOURCE_MAPPED_MANIFEST.chapters[0]!.audio_url);
+
+    audio.advanceTo(10);
+    for (;;) {
+      const r = await iter.next();
+      if (r.done) break;
+      if (r.value.code === 'end') break;
+    }
+  });
+
+  test('matches by source_spine_indexes array when section href is unrelated', async () => {
+    installFetchMock(MULTI_SOURCE_MAPPED_MANIFEST, MULTI_SOURCE_MAPPED_TIMESTAMPS);
+    // sectionIndex 7 is in source_spine_indexes but sectionHref is something
+    // unrelated to any source_href entry — forcing the match to depend on
+    // the spine-index array alone.
+    const ctl = makeController('', {
+      sectionIndex: 7,
+      sectionHref: 'OEBPS/xhtml/totally_unrelated.xhtml',
+    });
+    const client = new AudiobookTTSClient(ctl, 'https://example.com/manifest.json');
+    await client.init();
+    const audio = lastAudio!;
+
+    const abort = new AbortController();
+    const iter = client
+      .speak(
+        '<speak xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="en">' +
+          '<mark name="0"/>Unmatchable placeholder sentence.</speak>',
+        abort.signal,
+      )
+      [Symbol.asyncIterator]();
+
+    const first = await iter.next();
+    expect(first.done).toBe(false);
+    expect(audio.src).toBe(MULTI_SOURCE_MAPPED_MANIFEST.chapters[0]!.audio_url);
+
+    audio.advanceTo(10);
+    for (;;) {
+      const r = await iter.next();
+      if (r.done) break;
+      if (r.value.code === 'end') break;
+    }
   });
 });

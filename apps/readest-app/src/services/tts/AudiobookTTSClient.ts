@@ -66,11 +66,14 @@ interface AudiobookChapter {
   normalized_title?: string;
   audio_url: string;
   timestamps_url: string;
+  text_url?: string;
   word_count: number;
   duration_seconds: number;
   section_type?: string;
   source_spine_index?: number;
   source_href?: string;
+  source_spine_indexes?: number[];
+  source_hrefs?: string[];
   source_item_id?: string;
   source_title?: string;
   chunk_index_in_source?: number;
@@ -80,12 +83,14 @@ interface AudiobookChapter {
 }
 
 interface AudiobookManifest {
+  schema_version?: number;
   title: string;
   slug: string;
   voice_id: string;
   voice_name: string;
   generated_at: string;
   total_chapters: number;
+  chapters_url?: string;
   chapters: AudiobookChapter[];
 }
 
@@ -243,7 +248,8 @@ export class AudiobookTTSClient implements TTSClient {
 
     if (sectionHref) {
       for (const chapter of this.#manifest.chapters) {
-        if (this.#hrefsMatch(chapter.source_href, sectionHref)) {
+        const sourceHrefs = [chapter.source_href, ...(chapter.source_hrefs ?? [])];
+        if (sourceHrefs.some((sourceHref) => this.#hrefsMatch(sourceHref, sectionHref))) {
           add(chapter);
         }
       }
@@ -251,7 +257,11 @@ export class AudiobookTTSClient implements TTSClient {
 
     if (sectionIndex >= 0) {
       for (const chapter of this.#manifest.chapters) {
-        if (chapter.source_spine_index === sectionIndex) {
+        const sourceSpineIndexes = [
+          chapter.source_spine_index,
+          ...(chapter.source_spine_indexes ?? []),
+        ];
+        if (sourceSpineIndexes.includes(sectionIndex)) {
           add(chapter);
         }
       }

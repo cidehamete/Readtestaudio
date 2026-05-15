@@ -112,6 +112,7 @@ export class AudiobookTTSClient implements TTSClient {
   #playbackRate = 1.0;
   #positionSaveIntervalId: ReturnType<typeof setInterval> | null = null;
   #lastTimeDispatchMs = 0;
+  #visibilityListenerInstalled = false;
 
   constructor(controller: TTSController, manifestUrl: string) {
     this.controller = controller;
@@ -144,6 +145,7 @@ export class AudiobookTTSClient implements TTSClient {
       this.#audioEl.addEventListener('timeupdate', this.#handleTimeUpdate);
       // Save position every 10 seconds during playback
       this.#positionSaveIntervalId = setInterval(() => this.#savePosition(), 10_000);
+      this.#installVisibilityListener();
       this.initialized = true;
       console.info(
         `[AudiobookTTSClient] Loaded "${this.#manifest.title}" (${this.#manifest.total_chapters} chapters)`,
@@ -162,6 +164,7 @@ export class AudiobookTTSClient implements TTSClient {
       clearInterval(this.#positionSaveIntervalId);
       this.#positionSaveIntervalId = null;
     }
+    this.#removeVisibilityListener();
     this.#nextAudioEl?.pause();
     this.#nextAudioEl = null;
     this.#audioEl?.removeEventListener('timeupdate', this.#handleTimeUpdate);
@@ -170,6 +173,40 @@ export class AudiobookTTSClient implements TTSClient {
     this.#timestampsCache.clear();
     this.#currentChapterIndex = -1;
     this.initialized = false;
+  }
+
+  // ── Lock-screen / visibility resync ──────────────────────────────────────────
+  //
+  // When iOS Safari locks the screen, requestAnimationFrame is suspended and
+  // 'timeupdate' may be throttled or briefly suppressed for the playing
+  // <audio> element. Either way, on the way BACK to visible we need to
+  // make sure any pending #waitUntilTime promise re-checks audio.currentTime
+  // so the highlight loop can catch up to where the audio actually is.
+  //
+  // Firing a synthetic 'timeupdate' achieves this without changing the wait
+  // semantics: every active waitUntilTime is listening on the audio element
+  // for 'timeupdate' and will resolve if currentTime is now past its target.
+
+  #handleVisibilityChange = (): void => {
+    if (typeof document === 'undefined') return;
+    if (document.visibilityState !== 'visible') return;
+    if (!this.#audioEl) return;
+    this.#audioEl.dispatchEvent(new Event('timeupdate'));
+    this.#dispatchCurrentTime(true);
+  };
+
+  #installVisibilityListener(): void {
+    if (this.#visibilityListenerInstalled) return;
+    if (typeof document === 'undefined') return;
+    document.addEventListener('visibilitychange', this.#handleVisibilityChange);
+    this.#visibilityListenerInstalled = true;
+  }
+
+  #removeVisibilityListener(): void {
+    if (!this.#visibilityListenerInstalled) return;
+    if (typeof document === 'undefined') return;
+    document.removeEventListener('visibilitychange', this.#handleVisibilityChange);
+    this.#visibilityListenerInstalled = false;
   }
 
   // ── Chapter matching ─────────────────────────────────────────────────────────
@@ -704,19 +741,42 @@ export class AudiobookTTSClient implements TTSClient {
 
   // ── Playback helpers ─────────────────────────────────────────────────────────
 
-  /** Resolves when audio.currentTime >= targetTime, the audio ends, or signal fires. */
+  /**
+   * Resolves when audio.currentTime >= targetTime, the audio ends, or signal fires.
+   *
+   * Listens on three independent resolvers because no single one is reliable
+   * across iOS Safari's various background/foreground states:
+   *
+   *   • requestAnimationFrame — high precision when the tab is visible, but
+   *     paused entirely while the screen is locked.
+   *   • the audio element's 'timeupdate' event — continues firing on iOS even
+   *     when the screen is locked, because a playing <audio> element drives
+   *     it from the media subsystem rather than the JS event loop. This is
+   *     what keeps the highlight loop progressing during background playback.
+   *   • document 'visibilitychange' → visible — belt-and-suspenders for the
+   *     case where iOS briefly suppresses timeupdate too. The client also
+   *     fires a synthetic timeupdate on visibility resume (see init()), so
+   *     this listener is mostly insurance.
+   *
+   * Whichever fires first resolves the wait; the others are torn down.
+   */
   #waitUntilTime(targetTime: number, signal: AbortSignal): Promise<void> {
     return new Promise((resolve) => {
       const audio = this.#audioEl!;
       let rafId: number;
-      const onAbort = () => done();
-      const onEnded = () => done();
 
       const done = () => {
         cancelAnimationFrame(rafId);
         signal.removeEventListener('abort', onAbort);
         audio.removeEventListener('ended', onEnded);
+        audio.removeEventListener('timeupdate', onTimeUpdate);
         resolve();
+      };
+
+      const onAbort = () => done();
+      const onEnded = () => done();
+      const onTimeUpdate = () => {
+        if (audio.currentTime >= targetTime || audio.ended || audio.paused) done();
       };
 
       const tick = () => {
@@ -729,6 +789,7 @@ export class AudiobookTTSClient implements TTSClient {
 
       signal.addEventListener('abort', onAbort, { once: true });
       audio.addEventListener('ended', onEnded, { once: true });
+      audio.addEventListener('timeupdate', onTimeUpdate);
       rafId = requestAnimationFrame(tick);
     });
   }

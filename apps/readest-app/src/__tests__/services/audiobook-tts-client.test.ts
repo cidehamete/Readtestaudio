@@ -758,4 +758,128 @@ describe('AudiobookTTSClient sync behavior', () => {
       if (r.value.code === 'end') break;
     }
   });
+
+  // Regression: on iOS Safari the screen-lock state freezes
+  // requestAnimationFrame entirely while the <audio> element keeps playing
+  // in the background (via Media Session). The OLD #waitUntilTime relied on
+  // rAF alone, so the highlight loop would hang at a single mark for the
+  // entire lock-screen period; on unlock the cursor was far behind the
+  // narrator and the reader "lost the thread".
+  //
+  // Fix: #waitUntilTime must ALSO resolve on the audio element's 'timeupdate'
+  // event, which continues firing on iOS while the audio plays in the
+  // background. With this, the per-mark wait advances at ~4 Hz even with
+  // rAF suspended.
+  test('advances marks via timeupdate when requestAnimationFrame is suspended', async () => {
+    const ctl = makeController();
+    const dispatchSpy = ctl.dispatchSpeakMark as unknown as ReturnType<typeof vi.fn>;
+    const client = new AudiobookTTSClient(ctl, 'https://example.com/manifest.json');
+    await client.init();
+    const audio = lastAudio!;
+
+    // Prime chapter 1 so subsequent speak() skips the chapter-load path.
+    const abort1 = new AbortController();
+    await primeFirstBlock(client, audio, abort1.signal, SSML_SENTENCE_A);
+    abort1.abort();
+    dispatchSpy.mockClear();
+    audio.setTimeSilently(0);
+
+    // Simulate iOS lock-screen: requestAnimationFrame is suspended.
+    // Scheduled rAF callbacks will never fire for the rest of this test.
+    vi.spyOn(globalThis, 'requestAnimationFrame').mockImplementation((): number => 0);
+
+    const abort2 = new AbortController();
+    const iter = client.speak(SSML_TWO_SENTENCES, abort2.signal)[Symbol.asyncIterator]();
+
+    // Mark 0 at t=0 dispatches immediately with audio at t=0 (no wait).
+    const first = await iter.next();
+    expect(first.done).toBe(false);
+    expect((first.value as { code: string; mark?: string }).mark).toBe('0');
+
+    // speak() is now awaiting #waitUntilTime for mark 1 (the fuzzy matcher
+    // anchors sentence 2 at the first non-filler keyword "happy" at t≈12s).
+    // Advance the audio element by dispatching timeupdate events — this is
+    // what iOS still delivers in the background even with rAF frozen.
+    // Without the fix, this wait never resolves and iter.next() hangs.
+    const secondPromise = iter.next();
+    await new Promise((r) => setTimeout(r, 5));
+    audio.advanceTo(2); // timeupdate, but still before sentenceStart
+    await new Promise((r) => setTimeout(r, 5));
+    audio.advanceTo(13); // timeupdate that crosses sentenceStart; should resolve wait
+    const second = (await Promise.race([
+      secondPromise,
+      new Promise((resolve) => setTimeout(() => resolve({ timedOut: true }), 1500)),
+    ])) as IteratorResult<{ code: string; mark?: string }> | { timedOut: true };
+    expect((second as { timedOut?: boolean }).timedOut).not.toBe(true);
+    expect(
+      ((second as IteratorResult<{ code: string; mark?: string }>).value as { mark: string }).mark,
+    ).toBe('1');
+
+    // Drain the 'end' yield. Audio is past mark 1, no further waits needed.
+    const tail = await drainWithTimeout(iter, 1500);
+    expect(tail.at(-1)).toBe('end');
+    // Both sentence marks must have been dispatched despite rAF being frozen.
+    expect(dispatchSpy.mock.calls.length).toBeGreaterThanOrEqual(2);
+  }, 10_000);
+
+  // Belt-and-suspenders for the case where iOS suppresses 'timeupdate' too
+  // (rare, but observed on long lock-screen periods or when the audio
+  // session is briefly interrupted). When the document becomes visible
+  // again, the client must wake any pending waitUntilTime so the loop can
+  // catch up to the audio's actual position instead of staying frozen.
+  test('wakes a stalled waitUntilTime when the document becomes visible again', async () => {
+    const ctl = makeController();
+    const dispatchSpy = ctl.dispatchSpeakMark as unknown as ReturnType<typeof vi.fn>;
+    const client = new AudiobookTTSClient(ctl, 'https://example.com/manifest.json');
+    await client.init();
+    const audio = lastAudio!;
+
+    const abort1 = new AbortController();
+    await primeFirstBlock(client, audio, abort1.signal, SSML_SENTENCE_A);
+    abort1.abort();
+    dispatchSpy.mockClear();
+    audio.setTimeSilently(0);
+
+    // Suspend rAF. The wait loop must therefore rely on either timeupdate
+    // (which we intentionally don't dispatch here) or visibilitychange.
+    vi.spyOn(globalThis, 'requestAnimationFrame').mockImplementation((): number => 0);
+
+    const abort2 = new AbortController();
+    const iter = client.speak(SSML_TWO_SENTENCES, abort2.signal)[Symbol.asyncIterator]();
+
+    const first = await iter.next();
+    expect(first.done).toBe(false);
+    expect((first.value as { code: string; mark?: string }).mark).toBe('0');
+
+    // speak() is now awaiting #waitUntilTime for mark 1 (t≈12s — see comment
+    // in the timeupdate test above for why the matcher lands here).
+    const secondPromise = iter.next();
+    await new Promise((r) => setTimeout(r, 5));
+
+    // Audio silently advances past mark 1 (no timeupdate dispatched).
+    audio.setTimeSilently(15);
+
+    // Simulate the user unlocking the screen / returning to the tab.
+    Object.defineProperty(document, 'visibilityState', {
+      configurable: true,
+      get: () => 'visible',
+    });
+    document.dispatchEvent(new Event('visibilitychange'));
+
+    // The visibilitychange handler in the client should wake the pending
+    // wait — either by re-checking audio.currentTime or by dispatching a
+    // synthetic timeupdate. Either way, the second mark should resolve.
+    const second = (await Promise.race([
+      secondPromise,
+      new Promise((resolve) => setTimeout(() => resolve({ timedOut: true }), 1500)),
+    ])) as IteratorResult<{ code: string; mark?: string }> | { timedOut: true };
+    expect((second as { timedOut?: boolean }).timedOut).not.toBe(true);
+    expect(
+      ((second as IteratorResult<{ code: string; mark?: string }>).value as { mark: string }).mark,
+    ).toBe('1');
+
+    const tail = await drainWithTimeout(iter, 1500);
+    expect(tail.at(-1)).toBe('end');
+    expect(dispatchSpy.mock.calls.length).toBeGreaterThanOrEqual(2);
+  }, 10_000);
 });

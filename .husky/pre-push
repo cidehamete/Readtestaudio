@@ -1,2 +1,6 @@
 pnpm -C apps/readest-app lint
-pnpm -C apps/readest-app test
+# `-- --run` forces vitest into one-shot mode in TTYs. The `test` script
+# launches `vitest` without `run`, which defaults to watch mode interactively
+# and would hang this hook forever. Devs can still get watch mode via plain
+# `pnpm test`.
+pnpm -C apps/readest-app test -- --run

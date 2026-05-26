@@ -877,18 +877,22 @@ const Annotator: React.FC<{ bookKey: string }> = ({ bookKey }) => {
     setShowExportDialog(true);
   };
 
-  const handleConfirmExport = async (markdownContent: string) => {
+  const handleConfirmExport = async (content: string, asPlainText: boolean) => {
     const { book } = bookData;
     if (!book) return;
 
     setTimeout(() => {
       // Delay to ensure it won't be overridden by system clipboard actions
-      navigator.clipboard?.writeText(markdownContent);
+      navigator.clipboard?.writeText(content);
     }, 100);
 
-    const filename = `${makeSafeFilename(book.title)}.md`;
-    const saved = await appService?.saveFile(filename, markdownContent, {
-      mimeType: 'text/markdown',
+    // Plain-text exports save as .txt/text-plain so they open directly in
+    // editors and Google Docs; markdown exports keep .md/text-markdown.
+    const extension = asPlainText ? 'txt' : 'md';
+    const mimeType = asPlainText ? 'text/plain' : 'text/markdown';
+    const filename = `${makeSafeFilename(book.title)}.${extension}`;
+    const saved = await appService?.saveFile(filename, content, {
+      mimeType,
     });
     eventDispatcher.dispatch('toast', {
       type: 'info',

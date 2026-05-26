@@ -857,6 +857,62 @@ export const useTTSControl = ({ bookKey, onRequestHidePanel }: UseTTSControlProp
     }
   }, []);
 
+  // Jump the reader's page to wherever the narrator currently is, WITHOUT
+  // moving the audio. Used after a long lock-screen when the visible text has
+  // fallen far behind the narration: instead of walking forward block-by-block
+  // we navigate straight to the narrator's section + fractional position, then
+  // re-anchor the TTS mark loop to that page so it tracks from there.
+  const handleJumpToNarrator = useCallback(async () => {
+    const ttsController = ttsControllerRef.current;
+    const client = ttsController?.ttsAudiobookClient;
+    if (!ttsController || !client?.initialized) return;
+    const loc = client.getNarrationLocation();
+    if (!loc) return;
+    const view = getView(bookKey);
+    if (!view) return;
+
+    // Resolve which EPUB section the narrator's chapter maps to.
+    const normHref = (h: string) =>
+      decodeURIComponent(h)
+        .split('#')[0]!
+        .replace(/^[./]+/, '')
+        .replace(/\\/g, '/')
+        .toLowerCase();
+    let sectionIndex = loc.sectionIndex;
+    if ((sectionIndex === undefined || sectionIndex < 0) && loc.sectionHref) {
+      const sections = view.book?.sections ?? [];
+      const target = normHref(loc.sectionHref);
+      sectionIndex = sections.findIndex((s) => {
+        const h = normHref((s as { href?: string }).href ?? '');
+        return !!h && (h === target || h.endsWith(`/${target}`) || target.endsWith(`/${h}`));
+      });
+    }
+    if (sectionIndex === undefined || sectionIndex < 0) return;
+
+    try {
+      await ttsController.stop();
+
+      // Move the page to the narrator's position within the chapter. A numeric
+      // anchor is interpreted by foliate's renderer as a fraction (0–1).
+      sectionChangingTimestampRef.current = Date.now();
+      await view.renderer.goTo?.({ index: sectionIndex, anchor: loc.fraction });
+
+      // Re-anchor the TTS walker to the now-visible page. The audio element is
+      // untouched, so it keeps playing from its current position; the mark loop
+      // resumes from here and the audio-leader sync takes over.
+      await ttsController.initViewTTS(sectionIndex);
+      const range = (view as unknown as { lastLocation?: { range?: Range } }).lastLocation?.range;
+      const ssml = range ? view.tts?.from(range) : view.tts?.start();
+
+      setIsPlaying(true);
+      setIsPaused(false);
+      if (ssml) ttsController.speak(ssml);
+    } catch (e) {
+      console.warn('[TTS] jump-to-narrator failed:', e);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [bookKey]);
+
   const handlePause = useCallback(async () => {
     const ttsController = ttsControllerRef.current;
     if (ttsController) {
@@ -1019,6 +1075,7 @@ export const useTTSControl = ({ bookKey, onRequestHidePanel }: UseTTSControlProp
     handleSeekTo,
     handleGetChapters,
     handleJumpToChapter,
+    handleJumpToNarrator,
     handlePause,
     audiobookCurrentTime,
     audiobookDuration,

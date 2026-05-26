@@ -113,6 +113,7 @@ export class AudiobookTTSClient implements TTSClient {
   #positionSaveIntervalId: ReturnType<typeof setInterval> | null = null;
   #lastTimeDispatchMs = 0;
   #visibilityListenerInstalled = false;
+  #pendingPauseTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(controller: TTSController, manifestUrl: string) {
     this.controller = controller;
@@ -165,6 +166,7 @@ export class AudiobookTTSClient implements TTSClient {
       this.#positionSaveIntervalId = null;
     }
     this.#removeVisibilityListener();
+    this.#cancelPendingPause();
     this.#nextAudioEl?.pause();
     this.#nextAudioEl = null;
     this.#audioEl?.removeEventListener('timeupdate', this.#handleTimeUpdate);
@@ -797,6 +799,14 @@ export class AudiobookTTSClient implements TTSClient {
   // ── Core speak ───────────────────────────────────────────────────────────────
 
   async *speak(ssml: string, signal: AbortSignal, preload = false): AsyncIterable<TTSMessageEvent> {
+    // Cancel any pause deferred by a preceding stop() as EARLY as possible —
+    // including on the preload pass. The controller runs a preload speak()
+    // before the real one at every block boundary; cancelling here (rather
+    // than after the preload early-return) closes the window in which the
+    // deferred pause could fire mid-transition and pause+replay the first
+    // word of the next sentence. (See #schedulePause() for the rationale.)
+    this.#cancelPendingPause();
+
     // Preload is a no-op for audiobooks; we can't pre-synthesise
     if (preload) {
       yield { code: 'end' } as TTSMessageEvent;
@@ -1004,6 +1014,8 @@ export class AudiobookTTSClient implements TTSClient {
   // ── Transport controls ───────────────────────────────────────────────────────
 
   async pause(): Promise<boolean> {
+    // Explicit user pause — cancel any deferred pause and stop immediately.
+    this.#cancelPendingPause();
     this.#audioEl?.pause();
     this.#savePosition();
     this.#dispatchCurrentTime(true);
@@ -1019,16 +1031,46 @@ export class AudiobookTTSClient implements TTSClient {
 
   async stop(): Promise<void> {
     // TTSController calls stop() both on user-stop AND between pages
-    // (inside forward()/backward()). We can't tell these cases apart,
-    // so we just pause + save position. The audio stays cued where it
-    // is; the next speak() call will resume from this position without
-    // reloading the src. Shutdown handles real cleanup.
+    // (inside forward()/backward()). We can't tell these cases apart up
+    // front, so we DEFER the pause briefly instead of pausing immediately.
+    //
+    // Why: on a block/paragraph boundary the next speak() arrives within a
+    // few ms and cancels the pending pause (see #cancelPendingPause() at the
+    // top of speak()), so the <audio> plays continuously across the boundary.
+    // Pausing then play()-ing the same MP3 makes iOS Safari's decoder back up
+    // to the nearest frame on resume, replaying ~20-50ms — audible as a
+    // repeated word, worst on short paragraphs. A real user-stop has no
+    // following speak(), so the deferred pause fires normally.
     if (this.#audioEl) {
       this.#savePosition();
-      this.#audioEl.pause();
+      this.#schedulePause();
       this.#dispatchCurrentTime(true);
     }
     // Keep #currentChapterIndex so same-chapter speak() calls skip reload.
+  }
+
+  /**
+   * Pause the audio after a delay unless cancelled by a new speak().
+   *
+   * The delay must comfortably exceed the time the controller spends between
+   * blocks (DOM walking, SSML preprocessing, preload) so a block transition
+   * always cancels the pause before it fires. Explicit user pause goes through
+   * pause() and stops immediately, so this delay only affects terminal stops
+   * (sleep timer, navigation) where a short tail of audio is harmless.
+   */
+  #schedulePause(delayMs = 400): void {
+    this.#cancelPendingPause();
+    this.#pendingPauseTimer = setTimeout(() => {
+      this.#pendingPauseTimer = null;
+      this.#audioEl?.pause();
+    }, delayMs);
+  }
+
+  #cancelPendingPause(): void {
+    if (this.#pendingPauseTimer !== null) {
+      clearTimeout(this.#pendingPauseTimer);
+      this.#pendingPauseTimer = null;
+    }
   }
 
   /** Skip backward by the given number of seconds (default 15). */
@@ -1121,6 +1163,38 @@ export class AudiobookTTSClient implements TTSClient {
     this.#savePosition();
     this.#dispatchCurrentTime(true);
     return true;
+  }
+
+  /**
+   * Where the narrator currently is, for the "jump to narrator" control.
+   *
+   * Returns the EPUB section the playing chapter maps to (via the source
+   * mapping) plus how far through that section the audio is (0–1, derived
+   * from currentTime / chapter duration). The reader uses this to move the
+   * page to the narrator's position after a long lock-screen, instead of
+   * walking forward block-by-block. The audio is NOT moved.
+   */
+  getNarrationLocation(): {
+    chapterIndex: number;
+    sectionIndex?: number;
+    sectionHref?: string;
+    fraction: number;
+  } | null {
+    if (!this.#audioEl || this.#currentChapterIndex < 0) return null;
+    const chapter = this.#findChapterByIndex(this.#currentChapterIndex);
+    if (!chapter) return null;
+    const duration =
+      (Number.isFinite(this.#audioEl.duration) && this.#audioEl.duration > 0
+        ? this.#audioEl.duration
+        : chapter.duration_seconds) || 0;
+    const fraction =
+      duration > 0 ? Math.min(1, Math.max(0, this.#audioEl.currentTime / duration)) : 0;
+    return {
+      chapterIndex: chapter.index,
+      sectionIndex: chapter.source_spine_index,
+      sectionHref: chapter.source_href,
+      fraction,
+    };
   }
 
   // ── Settings ─────────────────────────────────────────────────────────────────

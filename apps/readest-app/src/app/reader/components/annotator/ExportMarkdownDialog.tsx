@@ -18,7 +18,7 @@ interface ExportMarkdownDialogProps {
   booknotes: BookNote[];
   booknoteGroups: { [href: string]: BooknoteGroup };
   onCancel: () => void;
-  onExport: (markdown: string) => void;
+  onExport: (content: string, asPlainText: boolean) => void;
 }
 
 const ExportMarkdownDialog: React.FC<ExportMarkdownDialogProps> = ({
@@ -236,7 +236,7 @@ const ExportMarkdownDialog: React.FC<ExportMarkdownDialogProps> = ({
   };
 
   const handleExport = () => {
-    onExport(markdownPreview);
+    onExport(markdownPreview, exportConfig.exportAsPlainText);
   };
 
   return (

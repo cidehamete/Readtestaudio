@@ -882,4 +882,113 @@ describe('AudiobookTTSClient sync behavior', () => {
     expect(tail.at(-1)).toBe('end');
     expect(dispatchSpy.mock.calls.length).toBeGreaterThanOrEqual(2);
   }, 10_000);
+
+  // Regression: audio stutters (repeats a word) at paragraph breaks. Cause:
+  // TTSController.forward() calls stop() at every block boundary, and the OLD
+  // stop() paused the <audio> immediately; the next block's speak() then
+  // called play(). On iOS the MP3 decoder backs up to a frame boundary on
+  // resume, replaying ~20-50ms — audible as a repeated word, worst on short
+  // paragraphs where boundaries are frequent.
+  //
+  // Fix: stop() defers the pause briefly. A block boundary issues the next
+  // speak() within a few ms, which cancels the pending pause, so playback is
+  // continuous across paragraphs. A real user-stop has no following speak(),
+  // so the deferred pause fires.
+  test('does not pause audio across a block boundary (stop immediately followed by speak)', async () => {
+    const ctl = makeController();
+    const client = new AudiobookTTSClient(ctl, 'https://example.com/manifest.json');
+    await client.init();
+    const audio = lastAudio!;
+    const pauseSpy = vi.spyOn(audio, 'pause');
+
+    // Prime chapter 1.
+    const abort1 = new AbortController();
+    await primeFirstBlock(client, audio, abort1.signal, SSML_SENTENCE_A);
+    abort1.abort();
+    pauseSpy.mockClear();
+
+    // Simulate a block boundary: forward() calls stop() then the next block's
+    // speak() starts almost immediately.
+    audio.setTimeSilently(2);
+    await client.stop();
+    const abort2 = new AbortController();
+    const iter = client.speak(SSML_TWO_SENTENCES, abort2.signal)[Symbol.asyncIterator]();
+    await iter.next(); // begin the next block
+
+    // Wait past the debounce window to be sure no deferred pause fires.
+    await new Promise((r) => setTimeout(r, 200));
+
+    expect(audio.paused).toBe(false);
+    expect(pauseSpy).not.toHaveBeenCalled();
+    abort2.abort();
+  }, 10_000);
+
+  test('pauses audio after the debounce when stop() is a real user-stop (no following speak)', async () => {
+    const ctl = makeController();
+    const client = new AudiobookTTSClient(ctl, 'https://example.com/manifest.json');
+    await client.init();
+    const audio = lastAudio!;
+
+    const abort1 = new AbortController();
+    await primeFirstBlock(client, audio, abort1.signal, SSML_SENTENCE_A);
+    abort1.abort();
+
+    // Put the audio into a playing state, then issue a lone stop().
+    await audio.play();
+    expect(audio.paused).toBe(false);
+    await client.stop();
+
+    // No speak() follows; after the debounce window the audio must be paused.
+    await new Promise((r) => setTimeout(r, 550));
+    expect(audio.paused).toBe(true);
+  }, 10_000);
+
+  // "Jump to narrator" (#2): after a long lock-screen the page is far behind
+  // the audio. getNarrationLocation() reports the EPUB section the playing
+  // chapter maps to plus how far through it the audio is, so the reader can
+  // move the page straight to the narrator's spot instead of walking forward
+  // block-by-block. It must NOT move the audio.
+  test('getNarrationLocation reports the source section and fractional position', async () => {
+    installFetchMock(SOURCE_MAPPED_MANIFEST, SOURCE_MAPPED_TIMESTAMPS);
+    const ctl = makeController('', {
+      sectionIndex: 7,
+      sectionHref: 'OEBPS/xhtml/chapter1_split_001.xhtml',
+    });
+    const client = new AudiobookTTSClient(ctl, 'https://example.com/manifest.json');
+    await client.init();
+    const audio = lastAudio!;
+
+    // Drive into chapter 2 (source_spine_index 7, duration 5s).
+    const abort = new AbortController();
+    const iter = client
+      .speak(
+        '<speak xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="en">' +
+          '<mark name="0"/>Unmatchable placeholder sentence.</speak>',
+        abort.signal,
+      )
+      [Symbol.asyncIterator]();
+    await iter.next();
+    abort.abort();
+
+    // Chapter 2's duration is 5s; audio sitting at 2.5s ⇒ halfway.
+    audio.duration = 5;
+    audio.setTimeSilently(2.5);
+
+    const loc = client.getNarrationLocation();
+    expect(loc).not.toBeNull();
+    expect(loc!.chapterIndex).toBe(2);
+    expect(loc!.sectionIndex).toBe(7);
+    expect(loc!.sectionHref).toBe('OEBPS/xhtml/chapter1_split_001.xhtml');
+    expect(loc!.fraction).toBeCloseTo(0.5, 5);
+
+    // Reading the location must not have moved the audio.
+    expect(audio.currentTime).toBe(2.5);
+  }, 10_000);
+
+  test('getNarrationLocation returns null before any chapter is active', async () => {
+    const ctl = makeController();
+    const client = new AudiobookTTSClient(ctl, 'https://example.com/manifest.json');
+    await client.init();
+    expect(client.getNarrationLocation()).toBeNull();
+  });
 });

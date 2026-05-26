@@ -8,6 +8,7 @@
     "tauri": "pnpm --filter @readest/readest-app tauri",
     "dev-web": "pnpm --filter @readest/readest-app dev-web",
     "prepare": "husky",
+    "postinstall": "pnpm --filter @readest/readest-app setup-vendors",
     "fmt:check": "pnpm --filter @readest/readest-app fmt:check",
     "clippy:check": "pnpm --filter @readest/readest-app clippy:check",
     "format": "prettier --write \"**/*.{js,jsx,ts,tsx,css,json,md,html,yml}\"",

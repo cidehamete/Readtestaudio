@@ -665,14 +665,35 @@ export class AudiobookTTSClient implements TTSClient {
       this.#nextAudioEl.src === chapter.audio_url &&
       this.#nextAudioEl.readyState >= 1
     ) {
+      // Defensive teardown of the outgoing element before the swap. iOS Safari
+      // can keep an <audio> emitting sound briefly after pause() if its src is
+      // still attached, which produced an audible overlap with the new
+      // chapter's audio ("two voices at the same time"). Detaching the src
+      // and forcing a load() guarantees the old element is fully silenced.
       const prev = this.#audioEl;
       prev.pause();
       prev.removeEventListener('timeupdate', this.#handleTimeUpdate);
+      prev.src = '';
+      try {
+        prev.load?.();
+      } catch {
+        /* load() can throw if the element is already detached — harmless */
+      }
       this.#audioEl = this.#nextAudioEl;
       this.#audioEl.addEventListener('timeupdate', this.#handleTimeUpdate);
+      // The preloaded element should already be at currentTime 0, but force
+      // it in case a previous failed playback left it elsewhere.
+      try {
+        this.#audioEl.currentTime = 0;
+      } catch {
+        /* ignore — element may not be ready to seek yet */
+      }
       this.#nextAudioEl = prev;
-      this.#nextAudioEl.src = '';
     } else if (this.#audioEl.src !== chapter.audio_url) {
+      // Same defensive teardown for the in-place src-change path: pause first,
+      // detach, then assign the new URL.
+      this.#audioEl.pause();
+      this.#audioEl.src = '';
       this.#audioEl.src = chapter.audio_url;
     }
 

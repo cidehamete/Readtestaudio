@@ -676,7 +676,17 @@ export const useTTSControl = ({ bookKey, onRequestHidePanel }: UseTTSControlProp
       const bookTitle = bookData.book?.title?.trim();
 
       if (ttsControllerRef.current) {
-        ttsControllerRef.current.stop();
+        // Fully shut the prior controller down before creating a new one.
+        // Fire-and-forget stop() let the old audio element keep playing for
+        // up to the debounce window while the new controller's audio also
+        // started — producing two voices simultaneously. Awaiting shutdown
+        // guarantees the old <audio> is paused, src-detached, and nulled
+        // before the next one is wired up.
+        try {
+          await ttsControllerRef.current.shutdown();
+        } catch (e) {
+          console.warn('[TTS] prior controller shutdown threw; continuing anyway', e);
+        }
         ttsControllerRef.current = null;
       }
 

@@ -367,18 +367,27 @@ const TTSPanel = ({
         >
           <MdFastRewind size={iconSize32} />
         </button>
-        <button
-          onClick={onTogglePlay}
-          className='rounded-full p-1 transition-transform duration-200 hover:scale-105'
-          title={isPlaying ? _('Pause') : _('Play')}
-          aria-label={isPlaying ? _('Pause') : _('Play')}
-        >
-          {isPlaying ? (
-            <MdPauseCircle size={iconSize48} className='fill-primary' />
-          ) : (
-            <MdPlayCircle size={iconSize48} className='fill-primary' />
-          )}
-        </button>
+        {/*
+         * Play/pause lives in the always-visible TTSBar during audiobook
+         * playback (alongside skip±15/30s and jump-to-narrator). Hiding
+         * the popup's duplicate button keeps a single source of truth for
+         * the play state. For non-audiobook TTS the bar is opt-in, so the
+         * popup keeps its own play button.
+         */}
+        {!isAudiobookActive && (
+          <button
+            onClick={onTogglePlay}
+            className='rounded-full p-1 transition-transform duration-200 hover:scale-105'
+            title={isPlaying ? _('Pause') : _('Play')}
+            aria-label={isPlaying ? _('Pause') : _('Play')}
+          >
+            {isPlaying ? (
+              <MdPauseCircle size={iconSize48} className='fill-primary' />
+            ) : (
+              <MdPlayCircle size={iconSize48} className='fill-primary' />
+            )}
+          </button>
+        )}
         <button
           onClick={() => onForward()}
           className='rounded-full p-1 transition-transform duration-200 hover:scale-105'

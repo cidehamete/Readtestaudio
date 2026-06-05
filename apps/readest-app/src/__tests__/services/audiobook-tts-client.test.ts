@@ -34,6 +34,7 @@ class FakeAudio extends EventTarget {
   preload = 'auto';
   playbackRate = 1;
   preservesPitch = true;
+  load = vi.fn();
 
   // Counts explicit assignments to currentTime so tests can assert no seeks.
   currentTimeSetCount = 0;
@@ -424,8 +425,9 @@ async function primeFirstBlock(
   ssml: string,
 ): Promise<void> {
   // Start the first speak() and let it complete by advancing audio past all its marks.
-  audio.advanceTo(20);
   const iter = client.speak(ssml, signal)[Symbol.asyncIterator]();
+  await iter.next().catch(() => {});
+  audio.advanceTo(20);
   await drainWithTimeout(iter, 2000).catch(() => {
     // If it hangs we don't care for this prime call — subsequent tests still
     // work because chapter state is set after the first speak() initiates.
@@ -816,6 +818,7 @@ describe('AudiobookTTSClient sync behavior', () => {
     ).toBe('1');
 
     // Drain the 'end' yield. Audio is past mark 1, no further waits needed.
+    audio.advanceTo(20);
     const tail = await drainWithTimeout(iter, 1500);
     expect(tail.at(-1)).toBe('end');
     // Both sentence marks must have been dispatched despite rAF being frozen.
@@ -878,6 +881,7 @@ describe('AudiobookTTSClient sync behavior', () => {
       ((second as IteratorResult<{ code: string; mark?: string }>).value as { mark: string }).mark,
     ).toBe('1');
 
+    audio.advanceTo(20);
     const tail = await drainWithTimeout(iter, 1500);
     expect(tail.at(-1)).toBe('end');
     expect(dispatchSpy.mock.calls.length).toBeGreaterThanOrEqual(2);
@@ -941,6 +945,61 @@ describe('AudiobookTTSClient sync behavior', () => {
     // No speak() follows; after the debounce window the audio must be paused.
     await new Promise((r) => setTimeout(r, 550));
     expect(audio.paused).toBe(true);
+  }, 10_000);
+
+  test('shutdown immediately pauses and detaches the active audio element', async () => {
+    const ctl = makeController();
+    const client = new AudiobookTTSClient(ctl, 'https://example.com/manifest.json');
+    await client.init();
+    const audio = lastAudio!;
+
+    const abort = new AbortController();
+    await primeFirstBlock(client, audio, abort.signal, SSML_SENTENCE_A);
+    abort.abort();
+
+    await audio.play();
+    expect(audio.paused).toBe(false);
+    expect(audio.src).toBe(FAKE_MANIFEST.chapters[0]!.audio_url);
+
+    await client.shutdown();
+
+    expect(audio.paused).toBe(true);
+    expect(audio.src).toBe('');
+    expect(audio.load).toHaveBeenCalled();
+  }, 10_000);
+
+  test('waits for the final sentence end before yielding end', async () => {
+    const ctl = makeController();
+    const client = new AudiobookTTSClient(ctl, 'https://example.com/manifest.json');
+    await client.init();
+    const audio = lastAudio!;
+
+    const abort1 = new AbortController();
+    await primeFirstBlock(client, audio, abort1.signal, SSML_SENTENCE_A);
+    abort1.abort();
+
+    audio.setTimeSilently(8);
+    const abort2 = new AbortController();
+    const iter = client.speak(SSML_SHORT_WORDS, abort2.signal)[Symbol.asyncIterator]();
+
+    const boundaryPromise = iter.next();
+    await new Promise((r) => setTimeout(r, 5));
+    audio.advanceTo(12);
+    const boundary = await boundaryPromise;
+    expect(boundary.done).toBe(false);
+    expect(boundary.value.code).toBe('boundary');
+
+    const endPromise = iter.next();
+    const beforeSentenceEnd = await Promise.race([
+      endPromise,
+      new Promise((resolve) => setTimeout(() => resolve({ timedOut: true }), 100)),
+    ]);
+    expect((beforeSentenceEnd as { timedOut?: boolean }).timedOut).toBe(true);
+
+    audio.advanceTo(16);
+    const end = await endPromise;
+    expect(end.done).toBe(false);
+    expect(end.value.code).toBe('end');
   }, 10_000);
 
   // "Jump to narrator" (#2): after a long lock-screen the page is far behind

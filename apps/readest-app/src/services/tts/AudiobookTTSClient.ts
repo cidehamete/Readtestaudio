@@ -167,14 +167,29 @@ export class AudiobookTTSClient implements TTSClient {
     }
     this.#removeVisibilityListener();
     this.#cancelPendingPause();
-    this.#nextAudioEl?.pause();
+    if (this.#nextAudioEl) {
+      this.#silenceAudioElement(this.#nextAudioEl);
+    }
     this.#nextAudioEl = null;
-    this.#audioEl?.removeEventListener('timeupdate', this.#handleTimeUpdate);
+    if (this.#audioEl) {
+      this.#audioEl.removeEventListener('timeupdate', this.#handleTimeUpdate);
+      this.#silenceAudioElement(this.#audioEl);
+    }
     this.#audioEl = null;
     this.#manifest = null;
     this.#timestampsCache.clear();
     this.#currentChapterIndex = -1;
     this.initialized = false;
+  }
+
+  #silenceAudioElement(audio: HTMLAudioElement): void {
+    audio.pause();
+    audio.src = '';
+    try {
+      audio.load?.();
+    } catch {
+      /* load() can throw if the element is already detached — harmless */
+    }
   }
 
   // ── Lock-screen / visibility resync ──────────────────────────────────────────
@@ -939,11 +954,8 @@ export class AudiobookTTSClient implements TTSClient {
     // current audio position. Re-anchoring at every page turn self-corrects
     // any accumulated drift. Falls back to proportional pacing for marks
     // whose text cannot be matched against the timestamp word list.
-    const { startTimes: sentenceStartTimes } = this.#matchMarksToTimestamps(
-      marks,
-      timestamps,
-      pageStartAudioTime,
-    );
+    const { startTimes: sentenceStartTimes, endTimes: sentenceEndTimes } =
+      this.#matchMarksToTimestamps(marks, timestamps, pageStartAudioTime);
 
     console.info(
       `[AudiobookTTSClient] speak: chapter=${chapter.index} chapterChanged=${chapterChanged} ` +
@@ -966,12 +978,10 @@ export class AudiobookTTSClient implements TTSClient {
     //      at a block boundary. Doing so would skip unheard narration.
     //   2. If the audio has already passed a mark's start time (because the
     //      reader is catching up to the narrator), dispatch it immediately.
-    //   3. We do NOT wait for the last sentence's *end* time before yielding
-    //      'end'. The audio keeps playing continuously between blocks; the
-    //      next block's first mark will naturally wait for the audio to
-    //      arrive at its true position. Removing the end-wait eliminates
-    //      the hang that occurred when proportional-pacing estimates
-    //      extrapolated past the chapter content.
+    //   3. We wait for the final sentence's end time before yielding 'end'.
+    //      Mid-chapter this preserves continuous playback. At a chapter
+    //      boundary it prevents the next speak() call from swapping audio.src
+    //      while the narrator is still finishing the last phrase.
     //
     // Seek-alignment: after a user-initiated seek (e.g. long-press on a word
     // later in the chapter) the audio jumps forward but speak() is handed an
@@ -1016,6 +1026,18 @@ export class AudiobookTTSClient implements TTSClient {
 
       this.controller?.dispatchSpeakMark(mark);
       yield { code: 'boundary', mark: mark.name } as TTSMessageEvent;
+    }
+
+    if (signal.aborted) {
+      this.#audioEl.pause();
+      this.#savePosition();
+      yield { code: 'error', message: 'Aborted' } as TTSMessageEvent;
+      return;
+    }
+
+    const finalSentenceEnd = sentenceEndTimes[marks.length - 1];
+    if (finalSentenceEnd !== undefined && this.#audioEl.currentTime < finalSentenceEnd) {
+      await this.#waitUntilTime(finalSentenceEnd, signal);
     }
 
     if (signal.aborted) {

@@ -33,6 +33,7 @@ const mockView = {
   },
   resolveCFI: vi.fn().mockReturnValue({ index: 0, anchor: () => new Range() }),
   getCFI: vi.fn().mockReturnValue('cfi'),
+  addAnnotation: vi.fn(),
   deselect: vi.fn(),
   resolveNavigation: vi.fn(),
   history: { back: vi.fn(), forward: vi.fn() },
@@ -47,6 +48,7 @@ const mockView = {
 const mockProgress = {
   location: { start: { cfi: '' }, end: { cfi: '' } },
   index: 0,
+  page: 3,
   range: null,
   sectionLabel: '',
 };
@@ -71,6 +73,7 @@ vi.mock('@/store/readerStore', () => {
   const store = {
     hoveredBookKey: null,
     getView: () => mockView,
+    getViewsById: () => [mockView],
     getProgress: () => mockProgress,
     getViewSettings: () => mockViewSettings,
     setViewSettings: vi.fn(),
@@ -81,9 +84,32 @@ vi.mock('@/store/readerStore', () => {
   return { useReaderStore };
 });
 
+const mockConfig = {
+  booknotes: [] as unknown[],
+};
+const mockSaveConfig = vi.fn().mockResolvedValue(undefined);
+const mockUpdateBooknotes = vi.fn((_bookKey: string, booknotes: unknown[]) => ({
+  ...mockConfig,
+  booknotes,
+}));
+
 vi.mock('@/store/bookDataStore', () => ({
   useBookDataStore: () => ({
     getBookData: () => mockBookData,
+    getConfig: () => mockConfig,
+    saveConfig: mockSaveConfig,
+    updateBooknotes: mockUpdateBooknotes,
+  }),
+}));
+
+vi.mock('@/store/settingsStore', () => ({
+  useSettingsStore: () => ({
+    settings: {
+      globalReadSettings: {
+        highlightStyle: 'highlight',
+        highlightStyles: { highlight: 'yellow' },
+      },
+    },
   }),
 }));
 
@@ -188,6 +214,7 @@ vi.mock('@/utils/cfi', () => ({
 
 vi.mock('@/utils/misc', () => ({
   getLocale: () => 'en',
+  uniqueId: vi.fn(() => 'new-note-id'),
 }));
 
 vi.mock('@/utils/ttsMetadata', () => ({
@@ -225,8 +252,10 @@ vi.mock('@/app/reader/hooks/useTTSMediaSession', () => ({
 import { useTTSControl } from '@/app/reader/hooks/useTTSControl';
 import { eventDispatcher } from '@/utils/event';
 
+let latestTTSControl: ReturnType<typeof useTTSControl> | null = null;
+
 const Harness = () => {
-  useTTSControl({ bookKey: 'book-1' });
+  latestTTSControl = useTTSControl({ bookKey: 'book-1' });
   return null;
 };
 
@@ -242,8 +271,10 @@ describe('useTTSControl concurrent tts-speak events', () => {
     mockView.resolveNavigation.mockClear();
     mockView.renderer.goTo.mockClear();
     mockView.renderer.scrollToAnchor.mockClear();
+    mockView.addAnnotation.mockClear();
     mockView.resolveCFI.mockReturnValue({ index: 0, anchor: () => new Range() });
     mockView.getCFI.mockReturnValue('cfi');
+    latestTTSControl = null;
   });
 
   afterEach(() => {
@@ -289,8 +320,13 @@ describe('useTTSControl audio-as-leader behavior (audiobook)', () => {
     mockView.resolveNavigation.mockClear();
     mockView.renderer.goTo.mockClear();
     mockView.renderer.scrollToAnchor.mockClear();
+    mockView.addAnnotation.mockClear();
     mockView.resolveCFI.mockReturnValue({ index: 0, anchor: () => new Range() });
     mockView.getCFI.mockReturnValue('cfi');
+    mockConfig.booknotes = [];
+    mockSaveConfig.mockClear();
+    mockUpdateBooknotes.mockClear();
+    latestTTSControl = null;
   });
 
   afterEach(() => {
@@ -370,6 +406,64 @@ describe('useTTSControl audio-as-leader behavior (audiobook)', () => {
     );
     warnSpy.mockRestore();
   });
+
+  it('highlights recent audiobook marks from the last 10 seconds', async () => {
+    render(<Harness />);
+    await act(async () => {
+      await startAndAwait();
+    });
+
+    const timeListeners = controllerListeners['tts-audiobook-time'] || [];
+    const speakListeners = controllerListeners['tts-speak-mark'] || [];
+    const highlightListeners = controllerListeners['tts-highlight-mark'] || [];
+    expect(timeListeners.length).toBeGreaterThan(0);
+    expect(speakListeners.length).toBeGreaterThan(0);
+    expect(highlightListeners.length).toBeGreaterThan(0);
+
+    await act(async () => {
+      for (const handler of timeListeners) {
+        handler(
+          new CustomEvent('tts-audiobook-time', {
+            detail: { currentTime: 100, duration: 300, chapterTitle: 'Chapter', narratorName: 'N' },
+          }),
+        );
+      }
+      for (const handler of speakListeners) {
+        handler(new CustomEvent('tts-speak-mark', { detail: { name: '1', text: 'First keeper' } }));
+      }
+      for (const handler of highlightListeners) {
+        handler(new CustomEvent('tts-highlight-mark', { detail: { cfi: 'cfi-1' } }));
+      }
+
+      for (const handler of timeListeners) {
+        handler(
+          new CustomEvent('tts-audiobook-time', {
+            detail: { currentTime: 106, duration: 300, chapterTitle: 'Chapter', narratorName: 'N' },
+          }),
+        );
+      }
+      for (const handler of speakListeners) {
+        handler(
+          new CustomEvent('tts-speak-mark', { detail: { name: '2', text: 'Second keeper' } }),
+        );
+      }
+      for (const handler of highlightListeners) {
+        handler(new CustomEvent('tts-highlight-mark', { detail: { cfi: 'cfi-2' } }));
+      }
+
+      await latestTTSControl?.handleHighlightRecentAudiobook(10);
+    });
+
+    expect(mockView.addAnnotation).toHaveBeenCalledTimes(2);
+    expect(mockUpdateBooknotes).toHaveBeenCalledWith(
+      'book-1',
+      expect.arrayContaining([
+        expect.objectContaining({ cfi: 'cfi-1', text: 'First keeper', color: 'yellow' }),
+        expect.objectContaining({ cfi: 'cfi-2', text: 'Second keeper', color: 'yellow' }),
+      ]),
+    );
+    expect(mockSaveConfig).toHaveBeenCalled();
+  });
 });
 
 describe('useTTSControl tts-audiobook-seek cross-chapter behavior', () => {
@@ -387,8 +481,10 @@ describe('useTTSControl tts-audiobook-seek cross-chapter behavior', () => {
     mockAudiobookClient.cueToText.mockResolvedValue(true);
     mockView.resolveNavigation.mockClear();
     mockView.renderer.goTo.mockClear();
+    mockView.addAnnotation.mockClear();
     mockView.resolveCFI.mockReturnValue({ index: 0, anchor: () => new Range() });
     mockView.getCFI.mockReturnValue('cfi');
+    latestTTSControl = null;
   });
 
   afterEach(() => {

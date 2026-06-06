@@ -9,6 +9,7 @@ import {
   MdReplay,
   MdForward30,
   MdMyLocation,
+  MdHighlight,
 } from 'react-icons/md';
 import { Insets } from '@/types/misc';
 import { useEnv } from '@/context/EnvContext';
@@ -25,6 +26,7 @@ type TTSBarProps = {
   onForward: (byMark: boolean) => void;
   onSkipBack?: (seconds: number) => void;
   onSkipForward?: (seconds: number) => void;
+  onHighlightRecent?: (seconds: number) => void;
   onJumpToNarrator?: () => void;
   gridInsets: Insets;
 };
@@ -38,6 +40,7 @@ const TTSBar = ({
   onForward,
   onSkipBack,
   onSkipForward,
+  onHighlightRecent,
   onJumpToNarrator,
   gridInsets,
 }: TTSBarProps) => {
@@ -88,6 +91,16 @@ const TTSBar = ({
             >
               <MdForward30 size={iconSize32} />
             </button>
+            {onHighlightRecent && (
+              <button
+                onClick={() => onHighlightRecent(10)}
+                className='bg-primary text-primary-content rounded-full p-2 transition-transform duration-200 hover:scale-105'
+                title={_('Highlight last 10 seconds')}
+                aria-label={_('Highlight last 10 seconds')}
+              >
+                <MdHighlight size={iconSize32} />
+              </button>
+            )}
             {onJumpToNarrator && (
               <button
                 onClick={() => onJumpToNarrator()}

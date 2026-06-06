@@ -5,6 +5,7 @@ import { useThemeStore } from '@/store/themeStore';
 import { useBookDataStore } from '@/store/bookDataStore';
 import { useReaderStore } from '@/store/readerStore';
 import { useProofreadStore } from '@/store/proofreadStore';
+import { useSettingsStore } from '@/store/settingsStore';
 import { TransformContext } from '@/services/transformers/types';
 import { proofreadTransformer } from '@/services/transformers/proofread';
 import { useTranslation } from '@/hooks/useTranslation';
@@ -14,12 +15,13 @@ import { eventDispatcher } from '@/utils/event';
 import { genSSMLRaw, parseSSMLLang } from '@/utils/ssml';
 import { throttle } from '@/utils/throttle';
 import { isCfiInLocation } from '@/utils/cfi';
-import { getLocale } from '@/utils/misc';
+import { getLocale, uniqueId } from '@/utils/misc';
 import { buildTTSMediaMetadata } from '@/utils/ttsMetadata';
 import { invokeUseBackgroundAudio } from '@/utils/bridge';
 import { estimateTTSTime } from '@/utils/ttsTime';
 import { useTTSMediaSession } from './useTTSMediaSession';
 import { getAudiobookManifestUrl } from '@/hooks/useAudiobookLink';
+import { BookNote } from '@/types/book';
 
 interface UseTTSControlProps {
   bookKey: string;
@@ -28,11 +30,12 @@ interface UseTTSControlProps {
 
 export const useTTSControl = ({ bookKey, onRequestHidePanel }: UseTTSControlProps) => {
   const _ = useTranslation();
-  const { appService } = useEnv();
+  const { appService, envConfig } = useEnv();
   useAuth();
   const { isDarkMode } = useThemeStore();
-  const { getBookData } = useBookDataStore();
-  const { getView, getProgress, getViewSettings } = useReaderStore();
+  const { getBookData, getConfig, saveConfig, updateBooknotes } = useBookDataStore();
+  const { settings } = useSettingsStore();
+  const { getView, getViewsById, getProgress, getViewSettings } = useReaderStore();
   const { setViewSettings, setTTSEnabled } = useReaderStore();
   const { getMergedRules } = useProofreadStore();
 
@@ -57,6 +60,11 @@ export const useTTSControl = ({ bookKey, onRequestHidePanel }: UseTTSControlProp
   const previousSectionLabelRef = useRef<string | undefined>(undefined);
   const ttsControllerRef = useRef<TTSController | null>(null);
   const isStartingTTSRef = useRef(false);
+  const audiobookTimeRef = useRef(0);
+  const latestAudiobookMarkRef = useRef<TTSMark | null>(null);
+  const recentAudiobookMarksRef = useRef<
+    { cfi: string; text: string; time: number; page?: number }[]
+  >([]);
   const [ttsController, setTtsController] = useState<TTSController | null>(null);
   const [ttsClientsInited, setTtsClientsInitialized] = useState(false);
 
@@ -160,6 +168,7 @@ export const useTTSControl = ({ bookKey, onRequestHidePanel }: UseTTSControlProp
         }>
       ).detail;
       setAudiobookCurrentTime(currentTime);
+      audiobookTimeRef.current = currentTime;
       setAudiobookDuration(duration);
       setAudiobookChapterTitle(chapterTitle);
       setAudiobookNarrator(narratorName);
@@ -198,6 +207,7 @@ export const useTTSControl = ({ bookKey, onRequestHidePanel }: UseTTSControlProp
         ttsController.sectionIndex = sectionIndex ?? -1;
       }
       const mark = (e as CustomEvent<TTSMark>).detail;
+      latestAudiobookMarkRef.current = mark;
       const ttsMediaMetadata = viewSettings?.ttsMediaMetadata ?? 'sentence';
 
       const metadata = buildTTSMediaMetadata({
@@ -241,6 +251,22 @@ export const useTTSControl = ({ bookKey, onRequestHidePanel }: UseTTSControlProp
       const viewSettings = getViewSettings(bookKey);
       const { location } = progress || {};
       if (!cfi || !view || !location || !viewSettings) return;
+
+      if (ttsControllerRef.current?.ttsAudiobookClient?.initialized) {
+        const mark = latestAudiobookMarkRef.current;
+        if (mark?.text?.trim()) {
+          const recent = recentAudiobookMarksRef.current;
+          recent.push({
+            cfi,
+            text: mark.text.trim(),
+            time: audiobookTimeRef.current,
+            page: progress?.page,
+          });
+          recentAudiobookMarksRef.current = recent
+            .filter((entry) => audiobookTimeRef.current - entry.time <= 30)
+            .slice(-20);
+        }
+      }
 
       viewSettings.ttsLocation = cfi;
       setViewSettings(bookKey, viewSettings);
@@ -923,6 +949,100 @@ export const useTTSControl = ({ bookKey, onRequestHidePanel }: UseTTSControlProp
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [bookKey]);
 
+  const handleHighlightRecentAudiobook = useCallback(
+    async (seconds = 10) => {
+      const ttsController = ttsControllerRef.current;
+      if (!ttsController?.ttsAudiobookClient?.initialized) return;
+
+      const config = getConfig(bookKey);
+      const view = getView(bookKey);
+      const progress = getProgress(bookKey);
+      if (!config || !view) return;
+
+      const now = audiobookTimeRef.current;
+      const recentMarks = recentAudiobookMarksRef.current
+        .filter((entry) => now - entry.time <= seconds)
+        .filter(
+          (entry, index, entries) =>
+            entries.findIndex((other) => other.cfi === entry.cfi) === index,
+        );
+
+      if (recentMarks.length === 0) {
+        eventDispatcher.dispatch('toast', {
+          message: _('Nothing recent to highlight yet'),
+          type: 'info',
+          timeout: 2500,
+        });
+        return;
+      }
+
+      const style = settings.globalReadSettings.highlightStyle;
+      const color = settings.globalReadSettings.highlightStyles[style];
+      const existingBooknotes = [...(config.booknotes ?? [])];
+      const createdAt = Date.now();
+      const annotations: BookNote[] = recentMarks
+        .filter(
+          (entry) =>
+            !existingBooknotes.some(
+              (note) =>
+                note.cfi === entry.cfi &&
+                note.type === 'annotation' &&
+                note.style &&
+                !note.deletedAt,
+            ),
+        )
+        .map((entry) => ({
+          id: uniqueId(),
+          type: 'annotation',
+          cfi: entry.cfi,
+          style,
+          color,
+          text: entry.text,
+          note: '',
+          page: entry.page ?? progress?.page,
+          createdAt,
+          updatedAt: createdAt,
+        }));
+
+      if (annotations.length === 0) {
+        eventDispatcher.dispatch('toast', {
+          message: _('Already highlighted'),
+          type: 'info',
+          timeout: 2000,
+        });
+        return;
+      }
+
+      const views = getViewsById(bookKey.split('-')[0]!);
+      annotations.forEach((annotation) => views.forEach((view) => view?.addAnnotation(annotation)));
+      const updatedConfig = updateBooknotes(bookKey, [...existingBooknotes, ...annotations]);
+      if (updatedConfig) {
+        await saveConfig(envConfig, bookKey, updatedConfig, settings);
+      }
+
+      eventDispatcher.dispatch('toast', {
+        message:
+          annotations.length === 1
+            ? _('Highlighted recent sentence')
+            : _('Highlighted recent sentences'),
+        type: 'success',
+        timeout: 2500,
+      });
+    },
+    [
+      _,
+      bookKey,
+      envConfig,
+      getConfig,
+      getProgress,
+      getView,
+      getViewsById,
+      saveConfig,
+      settings,
+      updateBooknotes,
+    ],
+  );
+
   const handlePause = useCallback(async () => {
     const ttsController = ttsControllerRef.current;
     if (ttsController) {
@@ -1082,6 +1202,7 @@ export const useTTSControl = ({ bookKey, onRequestHidePanel }: UseTTSControlProp
     handleForward,
     handleSkipBack,
     handleSkipForward,
+    handleHighlightRecentAudiobook,
     handleSeekTo,
     handleGetChapters,
     handleJumpToChapter,

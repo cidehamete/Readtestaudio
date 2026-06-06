@@ -243,6 +243,7 @@ const TTSControl: React.FC<TTSControlProps> = ({ bookKey, gridInsets }) => {
           onForward={tts.handleForward}
           onSkipBack={tts.handleSkipBack}
           onSkipForward={tts.handleSkipForward}
+          onHighlightRecent={tts.handleHighlightRecentAudiobook}
           onJumpToNarrator={tts.handleJumpToNarrator}
           gridInsets={gridInsets}
         />

@@ -184,6 +184,7 @@ export class TTSController extends EventTarget {
     }
 
     this.#ttsSectionIndex = sectionIndex;
+    this.sectionIndex = sectionIndex;
 
     const currentSection = this.#getPrimaryContent();
     if (currentSection?.index !== sectionIndex) {
@@ -636,8 +637,7 @@ export class TTSController extends EventTarget {
   async navigateToChapter(chapterIndex: number): Promise<void> {
     if (!this.ttsAudiobookClient?.initialized) return;
     this.ttsAudiobookClient.setCurrentChapterByIndex(chapterIndex);
-    // Use chapterIndex - 1 as the EPUB section index (best-effort approximation)
-    const sectionIndex = chapterIndex - 1;
+    const sectionIndex = this.sectionIndex >= 0 ? this.sectionIndex : chapterIndex - 1;
     await this.stop();
     const ok = await this.#initTTSForSection(sectionIndex);
     if (ok) {

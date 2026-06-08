@@ -266,6 +266,7 @@ describe('useTTSControl concurrent tts-speak events', () => {
     for (const key of Object.keys(controllerListeners)) delete controllerListeners[key];
     initViewTTSError = null;
     mockProgress.sectionLabel = '';
+    mockProgress.index = 0;
     document.body.innerHTML = '';
     mockAudiobookClient.initialized = false;
     mockView.resolveNavigation.mockClear();
@@ -315,6 +316,7 @@ describe('useTTSControl audio-as-leader behavior (audiobook)', () => {
     for (const key of Object.keys(controllerListeners)) delete controllerListeners[key];
     initViewTTSError = null;
     mockProgress.sectionLabel = '';
+    mockProgress.index = 0;
     document.body.innerHTML = '';
     mockAudiobookClient.initialized = true;
     mockView.resolveNavigation.mockClear();
@@ -367,6 +369,36 @@ describe('useTTSControl audio-as-leader behavior (audiobook)', () => {
     // Audio is the leader → the hook must navigate the view to the audio's section.
     expect(mockView.resolveNavigation).toHaveBeenCalledWith(1);
     expect(mockView.renderer.goTo).toHaveBeenCalled();
+  });
+
+  it('does not overwrite the audiobook section hint with stale reader progress on speak marks', async () => {
+    render(<Harness />);
+    await act(async () => {
+      await startAndAwait();
+    });
+
+    const controller = ttsControllerInstances[0] as {
+      sectionIndex: number;
+      sectionLabel: string;
+    };
+    controller.sectionIndex = 5;
+    controller.sectionLabel = 'Audio section';
+    mockProgress.index = 0;
+    mockProgress.sectionLabel = 'Stale visible section';
+
+    const listeners = controllerListeners['tts-speak-mark'] || [];
+    expect(listeners.length).toBeGreaterThan(0);
+
+    await act(async () => {
+      for (const handler of listeners) {
+        handler(
+          new CustomEvent('tts-speak-mark', { detail: { name: '1', text: 'Current audio' } }),
+        );
+      }
+    });
+
+    expect(controller.sectionIndex).toBe(5);
+    expect(controller.sectionLabel).toBe('Audio section');
   });
 
   it('keeps audiobook startup alive when deriving the initial CFI throws', async () => {
@@ -473,6 +505,7 @@ describe('useTTSControl tts-audiobook-seek cross-chapter behavior', () => {
     for (const key of Object.keys(controllerListeners)) delete controllerListeners[key];
     initViewTTSError = null;
     mockProgress.sectionLabel = '';
+    mockProgress.index = 0;
     document.body.innerHTML = '';
     mockAudiobookClient.initialized = true;
     mockAudiobookClient.seekToText.mockClear();

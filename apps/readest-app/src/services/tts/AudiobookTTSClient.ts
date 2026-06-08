@@ -1232,10 +1232,28 @@ export class AudiobookTTSClient implements TTSClient {
         : chapter.duration_seconds) || 0;
     const fraction =
       duration > 0 ? Math.min(1, Math.max(0, this.#audioEl.currentTime / duration)) : 0;
+    const sectionIndexes = Array.from(
+      new Set(
+        [chapter.source_spine_index, ...(chapter.source_spine_indexes ?? [])].filter(
+          (index): index is number => typeof index === 'number' && index >= 0,
+        ),
+      ),
+    );
+    const sectionHrefs = Array.from(
+      new Set(
+        [chapter.source_href, ...(chapter.source_hrefs ?? [])].filter(
+          (href): href is string => !!href,
+        ),
+      ),
+    );
+    const sourceOffset =
+      sectionIndexes.length > 1
+        ? Math.min(sectionIndexes.length - 1, Math.floor(fraction * sectionIndexes.length))
+        : 0;
     return {
       chapterIndex: chapter.index,
-      sectionIndex: chapter.source_spine_index,
-      sectionHref: chapter.source_href,
+      sectionIndex: sectionIndexes[sourceOffset] ?? chapter.source_spine_index,
+      sectionHref: sectionHrefs[sourceOffset] ?? chapter.source_href,
       fraction,
     };
   }
@@ -1332,6 +1350,7 @@ export class AudiobookTTSClient implements TTSClient {
     const chapter = this.#manifest?.chapters.find((c) => c.index === chapterIndex);
     if (!chapter || !this.controller) return;
     this.controller.sectionLabel = chapter.title;
-    this.controller.sectionIndex = chapterIndex - 1;
+    this.controller.sectionIndex =
+      chapter.source_spine_index ?? chapter.source_spine_indexes?.[0] ?? chapterIndex - 1;
   }
 }

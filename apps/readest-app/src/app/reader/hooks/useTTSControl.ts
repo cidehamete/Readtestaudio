@@ -201,8 +201,9 @@ export const useTTSControl = ({ bookKey, onRequestHidePanel }: UseTTSControlProp
       const progress = getProgress(bookKey);
       const viewSettings = getViewSettings(bookKey);
       const { sectionLabel, index: sectionIndex } = progress || {};
+      const audiobookLeading = ttsControllerRef.current?.ttsAudiobookClient?.initialized === true;
       // Keep AudiobookTTSClient informed of the current chapter title and index
-      if (ttsController) {
+      if (ttsController && !audiobookLeading) {
         ttsController.sectionLabel = sectionLabel || '';
         ttsController.sectionIndex = sectionIndex ?? -1;
       }
@@ -251,8 +252,9 @@ export const useTTSControl = ({ bookKey, onRequestHidePanel }: UseTTSControlProp
       const viewSettings = getViewSettings(bookKey);
       const { location } = progress || {};
       if (!cfi || !view || !location || !viewSettings) return;
+      const audiobookLeading = ttsControllerRef.current?.ttsAudiobookClient?.initialized === true;
 
-      if (ttsControllerRef.current?.ttsAudiobookClient?.initialized) {
+      if (audiobookLeading) {
         const mark = latestAudiobookMarkRef.current;
         if (mark?.text?.trim()) {
           const recent = recentAudiobookMarksRef.current;
@@ -275,8 +277,6 @@ export const useTTSControl = ({ bookKey, onRequestHidePanel }: UseTTSControlProp
       // intent is that wherever the audiobook is, that's where the page
       // should be — so we skip the follow-gate and the cross-section
       // early-return that are there for text-only TTS catch-up UX.
-      const audiobookLeading = ttsControllerRef.current?.ttsAudiobookClient?.initialized === true;
-
       if (!audiobookLeading && !followingTTSLocationRef.current) return;
 
       const docs = view.renderer.getContents();

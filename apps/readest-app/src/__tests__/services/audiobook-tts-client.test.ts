@@ -1044,6 +1044,51 @@ describe('AudiobookTTSClient sync behavior', () => {
     expect(audio.currentTime).toBe(2.5);
   }, 10_000);
 
+  test('getNarrationLocation uses source_spine_indexes for multi-section chapters', async () => {
+    installFetchMock(MULTI_SOURCE_MAPPED_MANIFEST, MULTI_SOURCE_MAPPED_TIMESTAMPS);
+    const ctl = makeController('', {
+      sectionIndex: 7,
+      sectionHref: 'OEBPS/xhtml/totally_unrelated.xhtml',
+    });
+    const client = new AudiobookTTSClient(ctl, 'https://example.com/manifest.json');
+    await client.init();
+    const audio = lastAudio!;
+
+    const abort = new AbortController();
+    const iter = client
+      .speak(
+        '<speak xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="en">' +
+          '<mark name="0"/>Big chapter opening words.</speak>',
+        abort.signal,
+      )
+      [Symbol.asyncIterator]();
+    await iter.next();
+    abort.abort();
+
+    audio.duration = 4;
+    audio.setTimeSilently(3.4);
+
+    const loc = client.getNarrationLocation();
+    expect(loc).not.toBeNull();
+    expect(loc!.sectionIndex).toBe(7);
+    expect(loc!.fraction).toBeCloseTo(0.85, 5);
+  }, 10_000);
+
+  test('setCurrentChapterByIndex seeds the controller with source spine metadata', async () => {
+    installFetchMock(MULTI_SOURCE_MAPPED_MANIFEST, MULTI_SOURCE_MAPPED_TIMESTAMPS);
+    const ctl = makeController('', {
+      sectionIndex: 0,
+      sectionHref: 'OEBPS/xhtml/totally_unrelated.xhtml',
+    });
+    const client = new AudiobookTTSClient(ctl, 'https://example.com/manifest.json');
+    await client.init();
+
+    client.setCurrentChapterByIndex(1);
+
+    expect(ctl.sectionLabel).toBe('Big Chapter');
+    expect(ctl.sectionIndex).toBe(3);
+  });
+
   test('getNarrationLocation returns null before any chapter is active', async () => {
     const ctl = makeController();
     const client = new AudiobookTTSClient(ctl, 'https://example.com/manifest.json');

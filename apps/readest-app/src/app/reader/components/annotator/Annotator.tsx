@@ -877,7 +877,7 @@ const Annotator: React.FC<{ bookKey: string }> = ({ bookKey }) => {
     setShowExportDialog(true);
   };
 
-  const handleConfirmExport = async (content: string, asPlainText: boolean) => {
+  const handleConfirmExport = async (content: string, format: 'doc' | 'md' | 'txt') => {
     const { book } = bookData;
     if (!book) return;
 
@@ -886,10 +886,9 @@ const Annotator: React.FC<{ bookKey: string }> = ({ bookKey }) => {
       navigator.clipboard?.writeText(content);
     }, 100);
 
-    // Plain-text exports save as .txt/text-plain so they open directly in
-    // editors and Google Docs; markdown exports keep .md/text-markdown.
-    const extension = asPlainText ? 'txt' : 'md';
-    const mimeType = asPlainText ? 'text/plain' : 'text/markdown';
+    const extension = format;
+    const mimeType =
+      format === 'doc' ? 'application/msword' : format === 'txt' ? 'text/plain' : 'text/markdown';
     const filename = `${makeSafeFilename(book.title)}.${extension}`;
     const saved = await appService?.saveFile(filename, content, {
       mimeType,

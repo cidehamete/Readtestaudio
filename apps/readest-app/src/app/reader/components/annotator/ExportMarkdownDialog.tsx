@@ -18,7 +18,7 @@ interface ExportMarkdownDialogProps {
   booknotes: BookNote[];
   booknoteGroups: { [href: string]: BooknoteGroup };
   onCancel: () => void;
-  onExport: (content: string, asPlainText: boolean) => void;
+  onExport: (content: string, format: NoteExportConfig['exportFormat']) => void;
 }
 
 const ExportMarkdownDialog: React.FC<ExportMarkdownDialogProps> = ({
@@ -72,13 +72,17 @@ const ExportMarkdownDialog: React.FC<ExportMarkdownDialogProps> = ({
 
   const [exportConfig, setExportConfig] = useState<NoteExportConfig>(() => {
     const noteExportConfig = viewSettings?.noteExportConfig || DEFAULT_NOTE_EXPORT_CONFIG;
+    const exportFormat =
+      noteExportConfig.exportFormat ??
+      (noteExportConfig.exportAsPlainText ? 'txt' : DEFAULT_NOTE_EXPORT_CONFIG.exportFormat);
     if (!noteExportConfig.customTemplate) {
       return {
         ...noteExportConfig,
+        exportFormat,
         customTemplate: defaultTemplate,
       };
     }
-    return noteExportConfig;
+    return { ...noteExportConfig, exportFormat };
   });
 
   const [showSource, setShowSource] = useState(false);
@@ -107,7 +111,7 @@ const ExportMarkdownDialog: React.FC<ExportMarkdownDialogProps> = ({
       .trim();
   };
 
-  // Generate markdown preview based on current format settings
+  // Generate markdown source based on current format settings
   const markdownPreview = useMemo(() => {
     let output = '';
 
@@ -214,13 +218,10 @@ const ExportMarkdownDialog: React.FC<ExportMarkdownDialogProps> = ({
       output = lines.join('\n');
     }
 
-    // Strip markdown if plain text export is enabled
-    if (exportConfig.exportAsPlainText) {
-      output = stripMarkdown(output);
-    }
-
     return output;
   }, [exportConfig, booknoteGroups, bookTitle, bookAuthor, _]);
+
+  const plainTextPreview = useMemo(() => stripMarkdown(markdownPreview), [markdownPreview]);
 
   // Convert markdown to HTML for preview
   const htmlPreview = useMemo(() => {
@@ -235,8 +236,48 @@ const ExportMarkdownDialog: React.FC<ExportMarkdownDialogProps> = ({
     }));
   };
 
+  const handleFormatChange = (format: NoteExportConfig['exportFormat']) => {
+    setExportConfig((prev) => ({
+      ...prev,
+      exportFormat: format,
+      exportAsPlainText: format === 'txt',
+    }));
+  };
+
+  const escapeHtml = (value: string): string =>
+    value
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+
+  const buildDocumentHtml = (): string => {
+    const body = htmlPreview || `<p>${escapeHtml(_('No content to preview'))}</p>`;
+    return `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>${escapeHtml(bookTitle)}</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; line-height: 1.55; }
+    blockquote { border-left: 3px solid #cccccc; margin: 1em 0; padding-left: 1em; }
+    h1, h2, h3, h4 { line-height: 1.25; }
+  </style>
+</head>
+<body>
+${body}
+</body>
+</html>`;
+  };
+
   const handleExport = () => {
-    onExport(markdownPreview, exportConfig.exportAsPlainText);
+    const content =
+      exportConfig.exportFormat === 'doc'
+        ? buildDocumentHtml()
+        : exportConfig.exportFormat === 'txt'
+          ? plainTextPreview
+          : markdownPreview;
+    onExport(content, exportConfig.exportFormat);
   };
 
   return (
@@ -597,7 +638,7 @@ const ExportMarkdownDialog: React.FC<ExportMarkdownDialogProps> = ({
               <span className='text-sm'>{_('Show Source')}</span>
             </label>
           </div>
-          {showSource || exportConfig.exportAsPlainText ? (
+          {showSource || exportConfig.exportFormat === 'txt' ? (
             <div
               className={clsx(
                 'bg-base-200 max-h-[40vh] overflow-y-auto rounded-lg p-4 text-xs',
@@ -605,7 +646,8 @@ const ExportMarkdownDialog: React.FC<ExportMarkdownDialogProps> = ({
                 showSource ? 'font-mono' : 'font-sans',
               )}
             >
-              {markdownPreview || _('No content to preview')}
+              {(exportConfig.exportFormat === 'txt' ? plainTextPreview : markdownPreview) ||
+                _('No content to preview')}
             </div>
           ) : (
             <div
@@ -624,20 +666,19 @@ const ExportMarkdownDialog: React.FC<ExportMarkdownDialogProps> = ({
 
         {/* Footer Actions */}
         <div className='mt-4 flex flex-col items-start justify-between gap-4 sm:flex-row sm:items-center'>
-          <div className='flex items-center gap-3'>
-            <label className='flex cursor-pointer items-center gap-2'>
-              <input
-                type='checkbox'
-                checked={exportConfig.exportAsPlainText}
-                onChange={() => handleToggle('exportAsPlainText')}
-                className='toggle'
-              />
-              <span className='line-clamp-2 text-xs'>
-                {exportConfig.exportAsPlainText
-                  ? _('Export as Plain Text')
-                  : _('Export as Markdown')}
-              </span>
-            </label>
+          <div className='flex items-center gap-2'>
+            <span className='text-xs'>{_('Export as')}</span>
+            <select
+              value={exportConfig.exportFormat}
+              onChange={(e) =>
+                handleFormatChange(e.target.value as NoteExportConfig['exportFormat'])
+              }
+              className='select select-bordered select-xs'
+            >
+              <option value='doc'>{_('Document (.doc)')}</option>
+              <option value='md'>{_('Markdown (.md)')}</option>
+              <option value='txt'>{_('Plain Text (.txt)')}</option>
+            </select>
           </div>
           <div className='flex gap-4 self-end sm:self-auto'>
             <button onClick={onCancel} className='btn btn-ghost btn-sm'>

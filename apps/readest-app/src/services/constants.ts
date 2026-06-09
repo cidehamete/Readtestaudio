@@ -339,7 +339,7 @@ export const DEFAULT_NOTE_EXPORT_CONFIG: NoteExportConfig = {
   noteSeparator: '\n\n',
   useCustomTemplate: false,
   customTemplate: '',
-  exportAsPlainText: false,
+  exportFormat: 'doc',
 };
 
 export const DEFAULT_ANNOTATOR_CONFIG: AnnotatorConfig = {

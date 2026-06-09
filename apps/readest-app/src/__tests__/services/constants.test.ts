@@ -669,7 +669,7 @@ describe('services/constants', () => {
       expect(typeof DEFAULT_NOTE_EXPORT_CONFIG.noteSeparator).toBe('string');
       expect(typeof DEFAULT_NOTE_EXPORT_CONFIG.useCustomTemplate).toBe('boolean');
       expect(typeof DEFAULT_NOTE_EXPORT_CONFIG.customTemplate).toBe('string');
-      expect(typeof DEFAULT_NOTE_EXPORT_CONFIG.exportAsPlainText).toBe('boolean');
+      expect(DEFAULT_NOTE_EXPORT_CONFIG.exportFormat).toBe('doc');
     });
   });
 

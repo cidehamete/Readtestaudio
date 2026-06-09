@@ -302,7 +302,9 @@ export interface NoteExportConfig {
   noteSeparator: string;
   useCustomTemplate: boolean;
   customTemplate: string;
-  exportAsPlainText: boolean;
+  exportFormat: 'doc' | 'md' | 'txt';
+  /** @deprecated Use exportFormat instead. Kept to migrate older saved settings. */
+  exportAsPlainText?: boolean;
 }
 
 export interface AnnotatorConfig {

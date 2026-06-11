@@ -324,6 +324,25 @@ export class AudiobookTTSClient implements TTSClient {
     return matches;
   }
 
+  #getChapterSourceIndexes(chapter: AudiobookChapter): number[] {
+    return Array.from(
+      new Set(
+        [chapter.source_spine_index, ...(chapter.source_spine_indexes ?? [])].filter(
+          (index): index is number => typeof index === 'number' && index >= 0,
+        ),
+      ),
+    );
+  }
+
+  #findChapterBySourceSection(sectionIndex: number): AudiobookChapter | null {
+    if (!this.#manifest || sectionIndex < 0) return null;
+    return (
+      this.#manifest.chapters.find((chapter) =>
+        this.#getChapterSourceIndexes(chapter).includes(sectionIndex),
+      ) ?? null
+    );
+  }
+
   #extractKeywords(text: string, minLength = 2, maxKeywords = 4): string[] {
     return this.#normalizeWord(text)
       .split(/\s+/)
@@ -1256,6 +1275,48 @@ export class AudiobookTTSClient implements TTSClient {
       sectionHref: sectionHrefs[sourceOffset] ?? chapter.source_href,
       fraction,
     };
+  }
+
+  /**
+   * Resolve the next/previous EPUB section according to the audiobook manifest,
+   * not according to the raw EPUB spine. This prevents a narrated chapter that
+   * spans non-linear or generated split sections from briefly jumping the
+   * reader to an unrelated older section at text-section boundaries.
+   */
+  getAdjacentNarrationSectionIndex(
+    currentSectionIndex: number,
+    direction: 'next' | 'previous',
+  ): number | null {
+    if (!this.#manifest) return null;
+
+    const step = direction === 'next' ? 1 : -1;
+    const currentChapter =
+      this.#findChapterByIndex(this.#currentChapterIndex) ??
+      this.#findChapterBySourceSection(currentSectionIndex);
+    const currentChapterPosition = currentChapter
+      ? this.#manifest.chapters.findIndex((chapter) => chapter.index === currentChapter.index)
+      : -1;
+
+    if (currentChapter) {
+      const indexes = this.#getChapterSourceIndexes(currentChapter);
+      const offset = indexes.indexOf(currentSectionIndex);
+      const adjacent = offset >= 0 ? indexes[offset + step] : undefined;
+      if (typeof adjacent === 'number') return adjacent;
+    }
+
+    if (currentChapterPosition >= 0) {
+      for (
+        let i = currentChapterPosition + step;
+        i >= 0 && i < this.#manifest.chapters.length;
+        i += step
+      ) {
+        const indexes = this.#getChapterSourceIndexes(this.#manifest.chapters[i]!);
+        const sectionIndex = direction === 'next' ? indexes[0] : indexes[indexes.length - 1];
+        if (typeof sectionIndex === 'number') return sectionIndex;
+      }
+    }
+
+    return null;
   }
 
   // ── Settings ─────────────────────────────────────────────────────────────────

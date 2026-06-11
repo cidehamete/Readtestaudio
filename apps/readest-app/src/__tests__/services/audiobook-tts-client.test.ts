@@ -1089,6 +1089,34 @@ describe('AudiobookTTSClient sync behavior', () => {
     expect(ctl.sectionIndex).toBe(3);
   });
 
+  test('getAdjacentNarrationSectionIndex follows manifest source order within a chapter', async () => {
+    installFetchMock(MULTI_SOURCE_MAPPED_MANIFEST, MULTI_SOURCE_MAPPED_TIMESTAMPS);
+    const ctl = makeController('', {
+      sectionIndex: 3,
+      sectionHref: 'OEBPS/xhtml/primary_only.xhtml',
+    });
+    const client = new AudiobookTTSClient(ctl, 'https://example.com/manifest.json');
+    await client.init();
+    client.setCurrentChapterByIndex(1);
+
+    expect(client.getAdjacentNarrationSectionIndex(3, 'next')).toBe(4);
+    expect(client.getAdjacentNarrationSectionIndex(4, 'next')).toBe(5);
+    expect(client.getAdjacentNarrationSectionIndex(5, 'previous')).toBe(4);
+  });
+
+  test('getAdjacentNarrationSectionIndex jumps to the next chapter source when the active chapter ends', async () => {
+    installFetchMock(SOURCE_MAPPED_MANIFEST, SOURCE_MAPPED_TIMESTAMPS);
+    const ctl = makeController('', {
+      sectionIndex: 6,
+      sectionHref: 'OEBPS/xhtml/chapter1_split_000.xhtml',
+    });
+    const client = new AudiobookTTSClient(ctl, 'https://example.com/manifest.json');
+    await client.init();
+    client.setCurrentChapterByIndex(1);
+
+    expect(client.getAdjacentNarrationSectionIndex(6, 'next')).toBe(7);
+  });
+
   test('getNarrationLocation returns null before any chapter is active', async () => {
     const ctl = makeController();
     const client = new AudiobookTTSClient(ctl, 'https://example.com/manifest.json');

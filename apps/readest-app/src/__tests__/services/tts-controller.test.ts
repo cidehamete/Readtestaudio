@@ -597,6 +597,28 @@ describe('TTSController', () => {
       await controller.backward();
       expect(controller.state).toBe('backward-paused');
     });
+
+    test('forward uses audiobook manifest section order at text-section boundaries', async () => {
+      const onSectionChange = vi.fn().mockResolvedValue(undefined);
+      const c = new TTSController(mockAppService, mockView, false, undefined, onSectionChange);
+      c.ttsAudiobookClient = {
+        initialized: true,
+        getAdjacentNarrationSectionIndex: vi.fn().mockReturnValue(2),
+      } as unknown as TTSController['ttsAudiobookClient'];
+
+      await c.prepareSection(0);
+      mockView.tts!.next = vi.fn().mockReturnValue(undefined);
+
+      c.state = 'paused';
+      await c.forward();
+
+      expect(c.ttsAudiobookClient!.getAdjacentNarrationSectionIndex).toHaveBeenCalledWith(
+        0,
+        'next',
+      );
+      expect(onSectionChange).toHaveBeenCalledWith(2);
+      expect(c.sectionIndex).toBe(2);
+    });
   });
 
   describe('stop', () => {

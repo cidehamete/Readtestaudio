@@ -23,6 +23,9 @@ type TTSState =
   | 'setvoice-paused';
 
 const HIGHLIGHT_KEY = 'tts-highlight';
+const AUDIOBOOK_SECTION_TRANSITION_DELAY_MS = 650;
+
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 export class TTSController extends EventTarget {
   appService: AppService | null = null;
@@ -233,7 +236,10 @@ export class TTSController extends EventTarget {
   }
 
   async #initTTSForNextSection(): Promise<boolean> {
-    const nextIndex = this.#ttsSectionIndex + 1;
+    const narratedNextIndex = this.ttsAudiobookClient?.initialized
+      ? this.ttsAudiobookClient.getAdjacentNarrationSectionIndex(this.#ttsSectionIndex, 'next')
+      : null;
+    const nextIndex = narratedNextIndex ?? this.#ttsSectionIndex + 1;
     const sections = this.view.book.sections;
 
     if (!sections || nextIndex >= sections.length) {
@@ -244,7 +250,10 @@ export class TTSController extends EventTarget {
   }
 
   async #initTTSForPrevSection(): Promise<boolean> {
-    const prevIndex = this.#ttsSectionIndex - 1;
+    const narratedPrevIndex = this.ttsAudiobookClient?.initialized
+      ? this.ttsAudiobookClient.getAdjacentNarrationSectionIndex(this.#ttsSectionIndex, 'previous')
+      : null;
+    const prevIndex = narratedPrevIndex ?? this.#ttsSectionIndex - 1;
 
     if (prevIndex < 0) {
       return false;
@@ -267,6 +276,9 @@ export class TTSController extends EventTarget {
   }
 
   async #handleNavigationWithoutSSML(initSection: () => Promise<boolean>, isPlaying: boolean) {
+    if (isPlaying && this.ttsAudiobookClient?.initialized) {
+      await sleep(AUDIOBOOK_SECTION_TRANSITION_DELAY_MS);
+    }
     if (await initSection()) {
       if (isPlaying) {
         this.#speak(this.view.tts?.start());

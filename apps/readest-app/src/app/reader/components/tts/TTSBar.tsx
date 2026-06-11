@@ -8,7 +8,7 @@ import {
   MdSkipNext,
   MdReplay,
   MdForward30,
-  MdMyLocation,
+  MdSearch,
   MdHighlight,
 } from 'react-icons/md';
 import { Insets } from '@/types/misc';
@@ -27,7 +27,7 @@ type TTSBarProps = {
   onSkipBack?: (seconds: number) => void;
   onSkipForward?: (seconds: number) => void;
   onHighlightRecent?: (seconds: number) => void;
-  onJumpToNarrator?: () => void;
+  onSearch?: () => void;
   gridInsets: Insets;
 };
 
@@ -41,7 +41,7 @@ const TTSBar = ({
   onSkipBack,
   onSkipForward,
   onHighlightRecent,
-  onJumpToNarrator,
+  onSearch,
   gridInsets,
 }: TTSBarProps) => {
   const _ = useTranslation();
@@ -101,14 +101,14 @@ const TTSBar = ({
                 <MdHighlight size={iconSize32} />
               </button>
             )}
-            {onJumpToNarrator && (
+            {onSearch && (
               <button
-                onClick={() => onJumpToNarrator()}
+                onClick={onSearch}
                 className='rounded-full p-1 transition-transform duration-200 hover:scale-105'
-                title={_('Go to current position')}
-                aria-label={_('Go to current position')}
+                title={_('Search')}
+                aria-label={_('Search')}
               >
-                <MdMyLocation size={iconSize32} />
+                <MdSearch size={iconSize32} />
               </button>
             )}
           </>

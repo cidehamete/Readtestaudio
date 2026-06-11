@@ -141,6 +141,10 @@ const TTSControl: React.FC<TTSControlProps> = ({ bookKey, gridInsets }) => {
     setShowPanel(false);
   };
 
+  const handleShowSearch = () => {
+    eventDispatcher.dispatch('search-term', { term: null, bookKey });
+  };
+
   return (
     <>
       {shouldMountBackButton && (
@@ -244,7 +248,7 @@ const TTSControl: React.FC<TTSControlProps> = ({ bookKey, gridInsets }) => {
           onSkipBack={tts.handleSkipBack}
           onSkipForward={tts.handleSkipForward}
           onHighlightRecent={tts.handleHighlightRecentAudiobook}
-          onJumpToNarrator={tts.handleJumpToNarrator}
+          onSearch={handleShowSearch}
           gridInsets={gridInsets}
         />
       )}

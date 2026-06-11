@@ -279,6 +279,7 @@ export interface TTSConfig {
   showTTSBar: boolean;
   ttsHighlightOptions: TTSHighlightOptions;
   ttsMediaMetadata: TTSMediaMetadataMode;
+  ttsAudiobookBatterySaver: boolean;
 }
 
 export interface TranslatorConfig {

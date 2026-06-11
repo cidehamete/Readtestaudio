@@ -61,6 +61,8 @@ export const useTTSControl = ({ bookKey, onRequestHidePanel }: UseTTSControlProp
   const ttsControllerRef = useRef<TTSController | null>(null);
   const isStartingTTSRef = useRef(false);
   const audiobookTimeRef = useRef(0);
+  const lastAudiobookUiUpdateRef = useRef(0);
+  const pendingAudiobookVisibleSyncRef = useRef(false);
   const latestAudiobookMarkRef = useRef<TTSMark | null>(null);
   const recentAudiobookMarksRef = useRef<
     { cfi: string; text: string; time: number; page?: number }[]
@@ -75,6 +77,11 @@ export const useTTSControl = ({ bookKey, onRequestHidePanel }: UseTTSControlProp
     initMediaSession,
     deinitMediaSession,
   } = useTTSMediaSession({ bookKey });
+
+  const isAudiobookBatterySaverEnabled = useCallback(
+    () => !!getViewSettings(bookKey)?.ttsAudiobookBatterySaver,
+    [bookKey, getViewSettings],
+  );
 
   const handleTTSForward = async (event: CustomEvent) => {
     const detail = event.detail as { bookKey: string; byMark?: boolean } | undefined;
@@ -167,11 +174,23 @@ export const useTTSControl = ({ bookKey, onRequestHidePanel }: UseTTSControlProp
           narratorName: string;
         }>
       ).detail;
-      setAudiobookCurrentTime(currentTime);
       audiobookTimeRef.current = currentTime;
-      setAudiobookDuration(duration);
-      setAudiobookChapterTitle(chapterTitle);
-      setAudiobookNarrator(narratorName);
+
+      const batterySaverHidden =
+        ttsControllerRef.current?.ttsAudiobookClient?.initialized === true &&
+        isAudiobookBatterySaverEnabled() &&
+        typeof document !== 'undefined' &&
+        document.hidden;
+      const now = Date.now();
+      const shouldUpdateUi = !batterySaverHidden || now - lastAudiobookUiUpdateRef.current >= 2000;
+
+      if (shouldUpdateUi) {
+        lastAudiobookUiUpdateRef.current = now;
+        setAudiobookCurrentTime(currentTime);
+        setAudiobookDuration(duration);
+        setAudiobookChapterTitle(chapterTitle);
+        setAudiobookNarrator(narratorName);
+      }
 
       // Feed the iOS lock screen / Android media notification / Control Center
       // its scrubber position. Guarded by finite/positive values because iOS
@@ -183,7 +202,8 @@ export const useTTSControl = ({ bookKey, onRequestHidePanel }: UseTTSControlProp
         Number.isFinite(duration) &&
         duration > 0 &&
         Number.isFinite(currentTime) &&
-        currentTime >= 0
+        currentTime >= 0 &&
+        shouldUpdateUi
       ) {
         try {
           navigator.mediaSession.setPositionState({
@@ -267,6 +287,14 @@ export const useTTSControl = ({ bookKey, onRequestHidePanel }: UseTTSControlProp
           recentAudiobookMarksRef.current = recent
             .filter((entry) => audiobookTimeRef.current - entry.time <= 30)
             .slice(-20);
+        }
+        if (
+          isAudiobookBatterySaverEnabled() &&
+          typeof document !== 'undefined' &&
+          document.hidden
+        ) {
+          pendingAudiobookVisibleSyncRef.current = true;
+          return;
         }
       }
 
@@ -404,6 +432,13 @@ export const useTTSControl = ({ bookKey, onRequestHidePanel }: UseTTSControlProp
 
   const viewSettings = getViewSettings(bookKey);
   const bookData = getBookData(bookKey);
+
+  useEffect(() => {
+    if (ttsControllerRef.current) {
+      ttsControllerRef.current.audiobookBatterySaver = !!viewSettings?.ttsAudiobookBatterySaver;
+    }
+  }, [viewSettings?.ttsAudiobookBatterySaver]);
+
   const ttsTime = useMemo(() => {
     const rate = viewSettings?.ttsRate ?? 1;
     return estimateTTSTime(progress, rate);
@@ -474,6 +509,15 @@ export const useTTSControl = ({ bookKey, onRequestHidePanel }: UseTTSControlProp
       // Audio is the leader during audiobook playback — always follow it.
       const audiobookLeading = ttsControllerRef.current?.ttsAudiobookClient?.initialized === true;
       if (!audiobookLeading && !followingTTSLocationRef.current) return;
+      if (
+        audiobookLeading &&
+        isAudiobookBatterySaverEnabled() &&
+        typeof document !== 'undefined' &&
+        document.hidden
+      ) {
+        pendingAudiobookVisibleSyncRef.current = true;
+        return;
+      }
       const view = getView(bookKey);
       const sections = view?.book.sections;
       if (!sections || sectionIndex < 0 || sectionIndex >= sections.length) return;
@@ -481,7 +525,7 @@ export const useTTSControl = ({ bookKey, onRequestHidePanel }: UseTTSControlProp
       const resolved = view.resolveNavigation(sectionIndex);
       view.renderer.goTo?.(resolved);
     },
-    [bookKey, getView],
+    [bookKey, getView, isAudiobookBatterySaverEnabled],
   );
 
   // TTS highlight options
@@ -742,6 +786,7 @@ export const useTTSControl = ({ bookKey, onRequestHidePanel }: UseTTSControlProp
         // Seed the section label and index so AudiobookTTSClient can match the first chapter
         ttsController.sectionLabel = progress?.sectionLabel || '';
         ttsController.sectionIndex = progress?.index ?? -1;
+        ttsController.audiobookBatterySaver = !!viewSettings.ttsAudiobookBatterySaver;
 
         await ttsController.init();
         const audiobookActive = ttsController.ttsAudiobookClient?.initialized === true;
@@ -948,6 +993,24 @@ export const useTTSControl = ({ bookKey, onRequestHidePanel }: UseTTSControlProp
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [bookKey]);
+
+  useEffect(() => {
+    if (typeof document === 'undefined') return;
+    const handleVisibilityChange = () => {
+      if (
+        document.hidden ||
+        !pendingAudiobookVisibleSyncRef.current ||
+        !isAudiobookBatterySaverEnabled()
+      ) {
+        return;
+      }
+      pendingAudiobookVisibleSyncRef.current = false;
+      handleJumpToNarrator();
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => document.removeEventListener('visibilitychange', handleVisibilityChange);
+  }, [handleJumpToNarrator, isAudiobookBatterySaverEnabled]);
 
   const handleHighlightRecentAudiobook = useCallback(
     async (seconds = 10) => {

@@ -51,6 +51,7 @@ export class TTSController extends EventTarget {
   ttsEdgeVoices: TTSVoice[] = [];
   ttsNativeVoices: TTSVoice[] = [];
   ttsTargetLang: string = '';
+  audiobookBatterySaver: boolean = false;
 
   /** Current EPUB section label (chapter title). Set by useTTSControl from
    *  reading progress so AudiobookTTSClient can match chapters by title. */

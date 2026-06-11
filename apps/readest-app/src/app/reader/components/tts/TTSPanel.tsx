@@ -10,6 +10,7 @@ import {
   MdQueueMusic,
   MdLinkOff,
   MdLink,
+  MdBatterySaver,
 } from 'react-icons/md';
 import { TbChevronCompactDown, TbChevronCompactUp } from 'react-icons/tb';
 import { RiVoiceAiFill } from 'react-icons/ri';
@@ -129,6 +130,9 @@ const TTSPanel = ({
   const [voiceGroups, setVoiceGroups] = useState<TTSVoicesGroup[]>([]);
   const [rate, setRate] = useState(viewSettings?.ttsRate ?? 1.0);
   const [selectedVoice, setSelectedVoice] = useState(viewSettings?.ttsVoice ?? '');
+  const [audiobookBatterySaver, setAudiobookBatterySaver] = useState(
+    !!viewSettings?.ttsAudiobookBatterySaver,
+  );
   const [timeoutCountdown, setTimeoutCountdown] = useState(() =>
     getCountdownTime(timeoutTimestamp),
   );
@@ -174,6 +178,14 @@ const TTSPanel = ({
     setSelectedVoice(voice);
     const vs = getViewSettings(bookKey)!;
     vs.ttsVoice = voice;
+    setViewSettings(bookKey, vs);
+  };
+
+  const handleToggleAudiobookBatterySaver = () => {
+    const enabled = !audiobookBatterySaver;
+    setAudiobookBatterySaver(enabled);
+    const vs = getViewSettings(bookKey)!;
+    vs.ttsAudiobookBatterySaver = enabled;
     setViewSettings(bookKey, vs);
   };
 
@@ -308,6 +320,22 @@ const TTSPanel = ({
             <span>{formatTime(audiobookDuration)}</span>
           </div>
         </div>
+      )}
+
+      {isAudiobookActive && (
+        <label className='bg-base-300/70 flex w-full items-center justify-between gap-3 rounded-md px-3 py-2 text-sm'>
+          <span className='flex min-w-0 items-center gap-2'>
+            <MdBatterySaver size={18} className='shrink-0' />
+            <span className='truncate'>{_('Battery Saver')}</span>
+          </span>
+          <input
+            type='checkbox'
+            className='toggle toggle-primary toggle-sm'
+            checked={audiobookBatterySaver}
+            onChange={handleToggleAudiobookBatterySaver}
+            aria-label={_('Battery Saver')}
+          />
+        </label>
       )}
 
       {/* ── Rate slider + presets ────────────────────────────────── */}

@@ -761,7 +761,10 @@ export class AudiobookTTSClient implements TTSClient {
   #dispatchCurrentTime(force = false): void {
     if (!this.#audioEl || !this.#manifest) return;
     const now = Date.now();
-    if (!force && now - this.#lastTimeDispatchMs < 250) return;
+    const batterySaverHidden =
+      this.controller?.audiobookBatterySaver && typeof document !== 'undefined' && document.hidden;
+    const minIntervalMs = batterySaverHidden ? 2000 : 250;
+    if (!force && now - this.#lastTimeDispatchMs < minIntervalMs) return;
     this.#lastTimeDispatchMs = now;
     const chapter = this.#findChapterByIndex(this.#currentChapterIndex);
     this.controller?.dispatchEvent(

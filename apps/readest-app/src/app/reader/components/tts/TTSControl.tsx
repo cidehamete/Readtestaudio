@@ -17,7 +17,7 @@ import TTSBar from './TTSBar';
 
 const POPUP_WIDTH = 282;
 const POPUP_HEIGHT_DEFAULT = 160;
-const POPUP_HEIGHT_AUDIOBOOK = 320;
+const POPUP_HEIGHT_AUDIOBOOK = 360;
 const POPUP_PADDING = 10;
 
 interface TTSControlProps {

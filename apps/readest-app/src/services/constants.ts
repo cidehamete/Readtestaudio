@@ -316,6 +316,7 @@ export const DEFAULT_TTS_CONFIG: TTSConfig = {
   showTTSBar: false,
   ttsHighlightOptions: { style: 'highlight', color: '#808080' },
   ttsMediaMetadata: 'sentence',
+  ttsAudiobookBatterySaver: false,
 };
 
 export const DEFAULT_TRANSLATOR_CONFIG: TranslatorConfig = {

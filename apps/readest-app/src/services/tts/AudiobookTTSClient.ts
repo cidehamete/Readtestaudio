@@ -69,6 +69,11 @@ interface AudiobookChapter {
   text_url?: string;
   word_count: number;
   duration_seconds: number;
+  manifest_position?: number;
+  is_playable?: boolean;
+  playback_position?: number;
+  previous_playable_chapter_index?: number | null;
+  next_playable_chapter_index?: number | null;
   section_type?: string;
   source_spine_index?: number;
   source_href?: string;
@@ -82,15 +87,33 @@ interface AudiobookChapter {
   last_words?: string;
 }
 
+interface AudiobookSourceCandidate {
+  chapter_index: number;
+  manifest_position?: number;
+  chunk_index_in_source?: number;
+  chunks_in_source?: number;
+  section_type?: string;
+  is_primary_source?: boolean;
+}
+
+interface AudiobookSourceCandidates {
+  by_spine_index?: Record<string, AudiobookSourceCandidate[]>;
+  by_href?: Record<string, AudiobookSourceCandidate[]>;
+  by_item_id?: Record<string, AudiobookSourceCandidate[]>;
+}
+
 interface AudiobookManifest {
   schema_version?: number;
   title: string;
   slug: string;
+  asset_base_url?: string;
   voice_id: string;
   voice_name: string;
   generated_at: string;
   total_chapters: number;
   chapters_url?: string;
+  source_candidates?: AudiobookSourceCandidates;
+  playback_sequence?: number[];
   chapters: AudiobookChapter[];
 }
 
@@ -341,6 +364,79 @@ export class AudiobookTTSClient implements TTSClient {
         this.#getChapterSourceIndexes(chapter).includes(sectionIndex),
       ) ?? null
     );
+  }
+
+  #getPlaybackSequence(): number[] {
+    if (!this.#manifest) return [];
+    if (this.#manifest.playback_sequence?.length) {
+      return this.#manifest.playback_sequence;
+    }
+    return this.#manifest.chapters
+      .filter((chapter) => chapter.audio_url && chapter.word_count > 0)
+      .map((chapter) => chapter.index);
+  }
+
+  #findAdjacentPlayableChapter(
+    chapterIndex: number,
+    direction: 'next' | 'previous',
+  ): AudiobookChapter | null {
+    if (!this.#manifest || chapterIndex < 0) return null;
+    const sequence = this.#getPlaybackSequence();
+    const sequenceOffset = sequence.indexOf(chapterIndex);
+    if (sequenceOffset >= 0) {
+      const adjacentIndex = sequence[sequenceOffset + (direction === 'next' ? 1 : -1)];
+      return this.#findChapterByIndex(adjacentIndex ?? -1);
+    }
+
+    const manifestOffset = this.#manifest.chapters.findIndex(
+      (chapter) => chapter.index === chapterIndex,
+    );
+    if (manifestOffset < 0) return null;
+    const step = direction === 'next' ? 1 : -1;
+    for (let i = manifestOffset + step; i >= 0 && i < this.#manifest.chapters.length; i += step) {
+      const chapter = this.#manifest.chapters[i]!;
+      if (chapter.audio_url && chapter.word_count > 0) return chapter;
+    }
+    return null;
+  }
+
+  #isCurrentChapterAtEnd(): boolean {
+    if (!this.#audioEl || this.#currentChapterIndex < 0) return false;
+    if (this.#audioEl.ended) return true;
+    const chapter = this.#findChapterByIndex(this.#currentChapterIndex);
+    const duration =
+      Number.isFinite(this.#audioEl.duration) && this.#audioEl.duration > 0
+        ? this.#audioEl.duration
+        : (chapter?.duration_seconds ?? 0);
+    return duration > 0 && this.#audioEl.currentTime >= Math.max(0, duration - 0.25);
+  }
+
+  #selectSourceMatchedChapter(matches: AudiobookChapter[]): AudiobookChapter | null {
+    if (matches.length === 0) return null;
+
+    const currentOffset = matches.findIndex(
+      (chapter) => chapter.index === this.#currentChapterIndex,
+    );
+    if (currentOffset >= 0) {
+      if (!this.#isCurrentChapterAtEnd()) {
+        return matches[currentOffset]!;
+      }
+      const nextFromMatches = matches[currentOffset + 1];
+      if (nextFromMatches) return nextFromMatches;
+      const nextPlayable = this.#findAdjacentPlayableChapter(this.#currentChapterIndex, 'next');
+      if (nextPlayable && matches.some((chapter) => chapter.index === nextPlayable.index)) {
+        return nextPlayable;
+      }
+      return matches[currentOffset]!;
+    }
+
+    const nextPlayable = this.#findAdjacentPlayableChapter(this.#currentChapterIndex, 'next');
+    if (nextPlayable) {
+      const matchedNext = matches.find((chapter) => chapter.index === nextPlayable.index);
+      if (matchedNext) return matchedNext;
+    }
+
+    return matches[0]!;
   }
 
   #extractKeywords(text: string, minLength = 2, maxKeywords = 4): string[] {
@@ -893,9 +989,10 @@ export class AudiobookTTSClient implements TTSClient {
           })
         : null;
 
+    const sourceMatchedChapter = this.#selectSourceMatchedChapter(this.#getSourceMatchedChapters());
     const chapter =
       resolvedTextMatch?.chapter ??
-      this.#getSourceMatchedChapters()[0] ??
+      sourceMatchedChapter ??
       this.#findChapterByIndex(this.#currentChapterIndex) ??
       this.#findChapter(sectionLabel);
 
@@ -1307,13 +1404,10 @@ export class AudiobookTTSClient implements TTSClient {
       if (typeof adjacent === 'number') return adjacent;
     }
 
-    if (currentChapterPosition >= 0) {
-      for (
-        let i = currentChapterPosition + step;
-        i >= 0 && i < this.#manifest.chapters.length;
-        i += step
-      ) {
-        const indexes = this.#getChapterSourceIndexes(this.#manifest.chapters[i]!);
+    if (currentChapter && currentChapterPosition >= 0) {
+      const adjacentChapter = this.#findAdjacentPlayableChapter(currentChapter.index, direction);
+      if (adjacentChapter) {
+        const indexes = this.#getChapterSourceIndexes(adjacentChapter);
         const sectionIndex = direction === 'next' ? indexes[0] : indexes[indexes.length - 1];
         if (typeof sectionIndex === 'number') return sectionIndex;
       }

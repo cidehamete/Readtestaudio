@@ -238,15 +238,33 @@ vi.mock('@/utils/ttsTime', () => ({
   }),
 }));
 
+// A stable, test-controllable media-session ref. Defaults to current: null so
+// existing tests behave exactly as before (the action-handler effect no-ops on
+// a null session); the play/pause hardening test sets current to a fake
+// Web-style MediaSession that records the handlers the hook registers.
+const mediaSessionRefMock = vi.hoisted(() => ({ current: null as unknown }));
 vi.mock('@/app/reader/hooks/useTTSMediaSession', () => ({
   useTTSMediaSession: () => ({
-    mediaSessionRef: { current: null },
+    mediaSessionRef: mediaSessionRefMock,
     unblockAudio: vi.fn(),
     releaseUnblockAudio: vi.fn(),
     initMediaSession: vi.fn().mockResolvedValue(undefined),
     deinitMediaSession: vi.fn().mockResolvedValue(undefined),
   }),
 }));
+
+function makeFakeMediaSession() {
+  const handlers: Record<string, (...args: unknown[]) => void> = {};
+  return {
+    handlers,
+    playbackState: 'none' as string,
+    metadata: null as unknown,
+    setActionHandler(action: string, fn: ((...args: unknown[]) => void) | null) {
+      if (fn) handlers[action] = fn;
+      else delete handlers[action];
+    },
+  };
+}
 
 // Imports must come AFTER vi.mock calls so they pick up the mocked modules.
 import { useTTSControl } from '@/app/reader/hooks/useTTSControl';
@@ -704,5 +722,96 @@ describe('useTTSControl tts-audiobook-seek cross-chapter behavior', () => {
     expect(mockAudiobookClient.cueToText).toHaveBeenCalledWith('the cathedral stood silent');
     expect(controller.navigateToChapter).not.toHaveBeenCalled();
     expect(controller.start).not.toHaveBeenCalled();
+  });
+});
+
+describe('useTTSControl media-session play/pause hardening', () => {
+  beforeEach(() => {
+    ttsControllerInstances.length = 0;
+    pendingInitResolvers.length = 0;
+    for (const key of Object.keys(controllerListeners)) delete controllerListeners[key];
+    initViewTTSError = null;
+    mockProgress.sectionLabel = '';
+    document.body.innerHTML = '';
+    mockAudiobookClient.initialized = true;
+    mediaSessionRefMock.current = makeFakeMediaSession();
+  });
+
+  afterEach(() => {
+    cleanup();
+    mockAudiobookClient.initialized = false;
+    mediaSessionRefMock.current = null;
+  });
+
+  const startAndAwait = async () => {
+    const p = eventDispatcher.dispatch('tts-speak', { bookKey: 'book-1' });
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    while (pendingInitResolvers.length > 0) pendingInitResolvers.shift()!();
+    await p;
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+  };
+
+  // A rapid double "play" — what happens when iOS delivers the lock-screen
+  // play action while it is also natively resuming the <audio> element — must
+  // only ever start ONE playback. Two starts here is the doubled-voice bug.
+  it('starts playback only once when the play action fires twice in a row', async () => {
+    render(<Harness />);
+    await act(async () => {
+      await startAndAwait();
+    });
+
+    const fake = mediaSessionRefMock.current as ReturnType<typeof makeFakeMediaSession>;
+    const controller = ttsControllerInstances[0] as {
+      state: string;
+      start: ReturnType<typeof vi.fn>;
+      resume: ReturnType<typeof vi.fn>;
+      pause: ReturnType<typeof vi.fn>;
+    };
+    controller.state = 'idle';
+
+    // Move to a paused state via the lock-screen pause action.
+    await act(async () => {
+      fake.handlers['pause']?.();
+      for (let i = 0; i < 10; i++) await Promise.resolve();
+    });
+
+    controller.start.mockClear();
+    controller.resume.mockClear();
+
+    // Fire play twice synchronously (native resume + action handler race).
+    await act(async () => {
+      fake.handlers['play']?.();
+      fake.handlers['play']?.();
+      for (let i = 0; i < 10; i++) await Promise.resolve();
+    });
+
+    expect(controller.start.mock.calls.length + controller.resume.mock.calls.length).toBe(1);
+  });
+
+  it('routes the lock-screen pause action to a pause, never a resume', async () => {
+    render(<Harness />);
+    await act(async () => {
+      await startAndAwait();
+    });
+
+    const fake = mediaSessionRefMock.current as ReturnType<typeof makeFakeMediaSession>;
+    const controller = ttsControllerInstances[0] as {
+      state: string;
+      start: ReturnType<typeof vi.fn>;
+      resume: ReturnType<typeof vi.fn>;
+      pause: ReturnType<typeof vi.fn>;
+    };
+    controller.pause.mockClear();
+    controller.start.mockClear();
+    controller.resume.mockClear();
+
+    await act(async () => {
+      fake.handlers['pause']?.();
+      for (let i = 0; i < 10; i++) await Promise.resolve();
+    });
+
+    expect(controller.pause).toHaveBeenCalledTimes(1);
+    expect(controller.start).not.toHaveBeenCalled();
+    expect(controller.resume).not.toHaveBeenCalled();
   });
 });

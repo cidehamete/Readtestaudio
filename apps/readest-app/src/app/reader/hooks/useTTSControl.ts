@@ -60,6 +60,13 @@ export const useTTSControl = ({ bookKey, onRequestHidePanel }: UseTTSControlProp
   const previousSectionLabelRef = useRef<string | undefined>(undefined);
   const ttsControllerRef = useRef<TTSController | null>(null);
   const isStartingTTSRef = useRef(false);
+  // Guards against overlapping play/pause transitions. The iOS lock-screen
+  // widget can deliver a play/pause action at the same time as iOS natively
+  // toggles the underlying <audio> element (and the in-app button is a third
+  // source). Without this latch, two near-simultaneous "play" events each
+  // spawn a controller.start() → audio.play(), which is how a second voice
+  // ends up overlapping the first.
+  const isTogglingPlaybackRef = useRef(false);
   const audiobookTimeRef = useRef(0);
   const lastAudiobookUiUpdateRef = useRef(0);
   const pendingAudiobookVisibleSyncRef = useRef(false);
@@ -860,35 +867,63 @@ export const useTTSControl = ({ bookKey, onRequestHidePanel }: UseTTSControlProp
   };
 
   // Playback callbacks
-  const handleTogglePlay = useCallback(async () => {
+  const syncMediaSessionPlayback = useCallback(
+    async (playing: boolean) => {
+      if (!mediaSessionRef.current) return;
+      const mediaSession = mediaSessionRef.current;
+      if (mediaSession instanceof TauriMediaSession) {
+        await mediaSession.updatePlaybackState({ playing });
+      } else {
+        mediaSession.playbackState = playing ? 'playing' : 'paused';
+      }
+    },
+    [mediaSessionRef],
+  );
+
+  // Explicit resume — never starts a second playback if we're already playing
+  // or already mid-transition. Used by the lock-screen "play" action and the
+  // in-app toggle. Resolving "play" and "pause" to dedicated handlers (instead
+  // of a single toggle that reads stale React state) keeps the lock-screen
+  // widget and the JS in agreement about direction.
+  const handleResume = useCallback(async () => {
     const ttsController = ttsControllerRef.current;
     if (!ttsController) return;
-
-    if (isPlaying) {
-      setIsPlaying(false);
-      setIsPaused(true);
-      await ttsController.pause();
-    } else if (isPaused) {
+    if (isPlaying || isTogglingPlaybackRef.current) return;
+    isTogglingPlaybackRef.current = true;
+    try {
       setIsPlaying(true);
       setIsPaused(false);
-      // start for forward/backward/setvoice-paused
-      // set rate don't pause the tts
+      // start for forward/backward/setvoice-paused; set rate doesn't pause TTS
       if (ttsController.state === 'paused') {
         await ttsController.resume();
       } else {
         await ttsController.start();
       }
+      await syncMediaSessionPlayback(true);
+    } finally {
+      isTogglingPlaybackRef.current = false;
     }
+  }, [isPlaying, syncMediaSessionPlayback]);
 
-    if (mediaSessionRef.current) {
-      const mediaSession = mediaSessionRef.current;
-      if (mediaSession instanceof TauriMediaSession) {
-        await mediaSession.updatePlaybackState({ playing: !isPlaying });
-      } else {
-        mediaSession.playbackState = isPlaying ? 'paused' : 'playing';
+  const handleTogglePlay = useCallback(async () => {
+    const ttsController = ttsControllerRef.current;
+    if (!ttsController) return;
+    if (isTogglingPlaybackRef.current) return;
+
+    if (isPlaying) {
+      isTogglingPlaybackRef.current = true;
+      try {
+        setIsPlaying(false);
+        setIsPaused(true);
+        await ttsController.pause();
+        await syncMediaSessionPlayback(false);
+      } finally {
+        isTogglingPlaybackRef.current = false;
       }
+    } else if (isPaused) {
+      await handleResume();
     }
-  }, [isPlaying, isPaused, mediaSessionRef]);
+  }, [isPlaying, isPaused, handleResume, syncMediaSessionPlayback]);
 
   const handleBackward = useCallback(async (byMark = false) => {
     const ttsController = ttsControllerRef.current;
@@ -1108,12 +1143,18 @@ export const useTTSControl = ({ bookKey, onRequestHidePanel }: UseTTSControlProp
 
   const handlePause = useCallback(async () => {
     const ttsController = ttsControllerRef.current;
-    if (ttsController) {
+    if (!ttsController) return;
+    if (isTogglingPlaybackRef.current) return;
+    isTogglingPlaybackRef.current = true;
+    try {
       setIsPlaying(false);
       setIsPaused(true);
       await ttsController.pause();
+      await syncMediaSessionPlayback(false);
+    } finally {
+      isTogglingPlaybackRef.current = false;
     }
-  }, []);
+  }, [syncMediaSessionPlayback]);
 
   // Rate/voice/timeout/bar controls
   // rate range: 0.5 - 3, 1.0 is normal speed
@@ -1205,12 +1246,17 @@ export const useTTSControl = ({ bookKey, onRequestHidePanel }: UseTTSControlProp
   useEffect(() => {
     const { current: mediaSession } = mediaSessionRef;
     if (mediaSession) {
+      // Resolve lock-screen play/pause to explicit, direction-specific
+      // handlers (not a stale-state toggle). iOS natively pauses/resumes the
+      // <audio> element when these actions fire; the re-entrancy latch in the
+      // handlers prevents that native action and our JS from both spawning a
+      // second playback (the doubled-voice bug).
       mediaSession.setActionHandler('play', () => {
-        handleTogglePlay();
+        handleResume();
       });
 
       mediaSession.setActionHandler('pause', () => {
-        handleTogglePlay();
+        handlePause();
       });
 
       mediaSession.setActionHandler('stop', () => {
@@ -1243,7 +1289,7 @@ export const useTTSControl = ({ bookKey, onRequestHidePanel }: UseTTSControlProp
         handleBackward();
       });
     }
-  }, [handleTogglePlay, handlePause, handleForward, handleBackward, mediaSessionRef]);
+  }, [handleResume, handlePause, handleForward, handleBackward, mediaSessionRef]);
 
   return {
     isPlaying,

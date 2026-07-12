@@ -315,6 +315,68 @@ const MULTI_SOURCE_MAPPED_TIMESTAMPS: Record<string, unknown> = {
   },
 };
 
+const SPLIT_SOURCE_MAPPED_MANIFEST = {
+  schema_version: 2,
+  title: 'Split Source Book',
+  slug: 'split-source-book',
+  voice_id: 'v1',
+  voice_name: 'Tester',
+  generated_at: '2026-01-01T00:00:00Z',
+  total_chapters: 2,
+  playback_sequence: [1, 2],
+  chapters: [
+    {
+      index: 1,
+      title: 'Long Chapter, Part 1',
+      audio_url: 'https://example.com/audio/long_chapter_01.mp3',
+      timestamps_url: 'https://example.com/ts/long_chapter_01.json',
+      word_count: 4,
+      duration_seconds: 4,
+      source_spine_index: 4,
+      source_href: 'OEBPS/xhtml/long_chapter.xhtml',
+      source_item_id: 'long-chapter',
+      chunk_index_in_source: 1,
+      chunks_in_source: 2,
+      manifest_position: 0,
+      is_playable: true,
+      playback_position: 0,
+      next_playable_chapter_index: 2,
+    },
+    {
+      index: 2,
+      title: 'Long Chapter, Part 2',
+      audio_url: 'https://example.com/audio/long_chapter_02.mp3',
+      timestamps_url: 'https://example.com/ts/long_chapter_02.json',
+      word_count: 5,
+      duration_seconds: 5,
+      source_spine_index: 4,
+      source_href: 'OEBPS/xhtml/long_chapter.xhtml',
+      source_item_id: 'long-chapter',
+      chunk_index_in_source: 2,
+      chunks_in_source: 2,
+      manifest_position: 1,
+      is_playable: true,
+      playback_position: 1,
+      previous_playable_chapter_index: 1,
+    },
+  ],
+};
+
+const SPLIT_SOURCE_MAPPED_TIMESTAMPS: Record<string, unknown> = {
+  'https://example.com/ts/long_chapter_01.json': {
+    chapter: 1,
+    title: 'Long Chapter, Part 1',
+    duration_seconds: 4,
+    words: makeWords(['alpha', 'section', 'opening', 'done']),
+  },
+  'https://example.com/ts/long_chapter_02.json': {
+    chapter: 2,
+    title: 'Long Chapter, Part 2',
+    duration_seconds: 5,
+    words: makeWords(['beta', 'section', 'continues', 'after', 'split']),
+  },
+};
+
 function installFetchMock(
   manifest: typeof FAKE_MANIFEST = FAKE_MANIFEST,
   timestampsByUrl: Record<string, unknown> = {
@@ -1116,6 +1178,58 @@ describe('AudiobookTTSClient sync behavior', () => {
 
     expect(client.getAdjacentNarrationSectionIndex(6, 'next')).toBe(7);
   });
+
+  test('getAdjacentNarrationSectionIndex can keep the same EPUB section for split audiobook chapters', async () => {
+    installFetchMock(SPLIT_SOURCE_MAPPED_MANIFEST, SPLIT_SOURCE_MAPPED_TIMESTAMPS);
+    const ctl = makeController('', {
+      sectionIndex: 4,
+      sectionHref: 'OEBPS/xhtml/long_chapter.xhtml',
+    });
+    const client = new AudiobookTTSClient(ctl, 'https://example.com/manifest.json');
+    await client.init();
+    client.setCurrentChapterByIndex(1);
+
+    expect(client.getAdjacentNarrationSectionIndex(4, 'next')).toBe(4);
+  });
+
+  test('source matching advances to the next split audiobook chapter instead of jumping back', async () => {
+    installFetchMock(SPLIT_SOURCE_MAPPED_MANIFEST, SPLIT_SOURCE_MAPPED_TIMESTAMPS);
+    const ctl = makeController('', {
+      sectionIndex: 4,
+      sectionHref: 'OEBPS/xhtml/long_chapter.xhtml',
+    });
+    const client = new AudiobookTTSClient(ctl, 'https://example.com/manifest.json');
+    await client.init();
+    const activeAudio = lastAudio!;
+
+    const abort1 = new AbortController();
+    await primeFirstBlock(
+      client,
+      activeAudio,
+      abort1.signal,
+      '<speak xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="en">' +
+        '<mark name="0"/>Alpha section opening done.</speak>',
+    );
+    abort1.abort();
+
+    activeAudio.duration = 4;
+    activeAudio.setTimeSilently(4);
+
+    const abort2 = new AbortController();
+    const iter = client
+      .speak(
+        '<speak xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="en">' +
+          '<mark name="0"/>Unmatchable reader text.</speak>',
+        abort2.signal,
+      )
+      [Symbol.asyncIterator]();
+
+    await iter.next();
+    abort2.abort();
+
+    expect(client.getNarrationLocation()?.chapterIndex).toBe(2);
+    expect(lastAudio?.src).toBe('https://example.com/audio/long_chapter_02.mp3');
+  }, 10_000);
 
   test('getNarrationLocation returns null before any chapter is active', async () => {
     const ctl = makeController();

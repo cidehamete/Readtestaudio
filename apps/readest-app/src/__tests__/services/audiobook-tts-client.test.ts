@@ -1238,3 +1238,131 @@ describe('AudiobookTTSClient sync behavior', () => {
     expect(client.getNarrationLocation()).toBeNull();
   });
 });
+
+// ---- Cross-chapter long-press cue behavior -----------------------------------
+//
+// The user long-presses a word in a NEW chapter to make the narrator follow
+// them there. The reader hook has already pointed controller.sectionIndex at
+// the tapped section before calling cueToText(). The client must trust that
+// source mapping over the currently-playing chapter — otherwise a loose fuzzy
+// match in the old chapter wins (common phrases repeat across chapters) and
+// the audio never follows the finger.
+
+const CROSS_SEEK_MANIFEST = {
+  title: 'Cross Seek Book',
+  slug: 'cross-seek-book',
+  voice_id: 'v1',
+  voice_name: 'Tester',
+  generated_at: '2026-01-01T00:00:00Z',
+  total_chapters: 2,
+  chapters: [
+    {
+      index: 1,
+      title: 'Chapter 1',
+      audio_url: 'https://example.com/audio/cross_01.mp3',
+      timestamps_url: 'https://example.com/ts/cross_01.json',
+      word_count: 7,
+      duration_seconds: 7,
+      source_spine_index: 6,
+      source_href: 'OEBPS/xhtml/cross1.xhtml',
+    },
+    {
+      index: 2,
+      title: 'Chapter 2',
+      audio_url: 'https://example.com/audio/cross_02.mp3',
+      timestamps_url: 'https://example.com/ts/cross_02.json',
+      word_count: 7,
+      duration_seconds: 7,
+      source_spine_index: 7,
+      source_href: 'OEBPS/xhtml/cross2.xhtml',
+    },
+  ],
+};
+
+// The phrase "the river ran cold" appears in BOTH chapters, so a fuzzy search
+// that starts from the playing chapter will happily match there.
+const CROSS_SEEK_TIMESTAMPS: Record<string, unknown> = {
+  'https://example.com/ts/cross_01.json': {
+    chapter: 1,
+    title: 'Chapter 1',
+    duration_seconds: 7,
+    words: makeWords(['the', 'river', 'ran', 'cold', 'and', 'dark', 'tonight']),
+  },
+  'https://example.com/ts/cross_02.json': {
+    chapter: 2,
+    title: 'Chapter 2',
+    duration_seconds: 7,
+    words: makeWords(['later', 'the', 'river', 'ran', 'cold', 'again', 'here']),
+  },
+};
+
+describe('AudiobookTTSClient cross-chapter cue (long-press follow)', () => {
+  beforeEach(() => {
+    lastAudio = null;
+    installAudioMock();
+    installFetchMock(CROSS_SEEK_MANIFEST as typeof FAKE_MANIFEST, CROSS_SEEK_TIMESTAMPS);
+    vi.spyOn(console, 'info').mockImplementation(() => {});
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  /** Land the narrator in chapter 1 via an explicit-hint cue. */
+  async function makeClientInChapter1(): Promise<{
+    client: AudiobookTTSClient;
+    ctl: TTSController;
+  }> {
+    const ctl = makeController('Chapter 1', {
+      sectionIndex: 6,
+      sectionHref: 'OEBPS/xhtml/cross1.xhtml',
+    });
+    const client = new AudiobookTTSClient(ctl, 'https://example.com/manifest.json');
+    await client.init();
+    const primed = await client.cueToText('river ran cold and dark tonight', 1);
+    expect(primed).toBe(true);
+    expect(lastAudio!.src).toBe(CROSS_SEEK_MANIFEST.chapters[0]!.audio_url);
+    return { client, ctl };
+  }
+
+  test('cueToText prefers the tapped section chapter over the playing chapter for ambiguous phrases', async () => {
+    const { client, ctl } = await makeClientInChapter1();
+    const audio = lastAudio!;
+
+    // The reader hook syncs controller.sectionIndex to the tapped section
+    // (chapter 2's spine entry) before cueing.
+    ctl.sectionIndex = 7;
+    const ok = await client.cueToText('the river ran cold');
+
+    expect(ok).toBe(true);
+    expect(audio.src).toBe(CROSS_SEEK_MANIFEST.chapters[1]!.audio_url);
+    expect(audio.currentTime).toBe(1); // "the" in chapter 2 starts at 1s
+    expect(audio.paused).toBe(true);
+  });
+
+  test('cueToText falls back to the tapped section chapter start when no text match exists', async () => {
+    const { client, ctl } = await makeClientInChapter1();
+    const audio = lastAudio!;
+
+    ctl.sectionIndex = 7;
+    const ok = await client.cueToText('zzyzx qwxort unmatchable gibberish');
+
+    expect(ok).toBe(true);
+    expect(audio.src).toBe(CROSS_SEEK_MANIFEST.chapters[1]!.audio_url);
+    expect(audio.currentTime).toBe(0);
+    expect(audio.paused).toBe(true);
+  });
+
+  test('cueToText stays put when no text match exists and the tapped section maps to the playing chapter', async () => {
+    const { client } = await makeClientInChapter1();
+    const audio = lastAudio!;
+    const timeBefore = audio.currentTime;
+
+    const ok = await client.cueToText('zzyzx qwxort unmatchable gibberish');
+
+    expect(ok).toBe(false);
+    expect(audio.src).toBe(CROSS_SEEK_MANIFEST.chapters[0]!.audio_url);
+    expect(audio.currentTime).toBe(timeBefore);
+  });
+});

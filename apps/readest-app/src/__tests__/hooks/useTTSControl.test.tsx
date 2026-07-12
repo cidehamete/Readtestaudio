@@ -457,7 +457,74 @@ describe('useTTSControl audio-as-leader behavior (audiobook)', () => {
     warnSpy.mockRestore();
   });
 
-  it('highlights recent audiobook marks from the last 10 seconds', async () => {
+  // The flashlight button: the user listens at 2x and taps it after a passage
+  // catches their ear — by then the narrator is already into the NEXT
+  // paragraph. The button must highlight the paragraph BEFORE the one the
+  // narrator is currently in.
+  it('flashlight highlights the paragraph before the one being narrated', async () => {
+    render(<Harness />);
+    await act(async () => {
+      await startAndAwait();
+    });
+
+    document.body.innerHTML =
+      '<p id="para-1">First paragraph read moments ago.</p>' +
+      '<p id="para-2">Second paragraph currently being narrated.</p>';
+    // The latest highlight-mark cfi resolves to a position inside para-2.
+    mockView.resolveCFI.mockReturnValue({
+      index: 0,
+      anchor: (doc: Document) => {
+        const range = doc.createRange();
+        range.selectNodeContents(doc.getElementById('para-2')!);
+        return range;
+      },
+    });
+    // Reset first: an earlier test can leave an unconsumed mockImplementationOnce
+    // (a throwing getCFI) queued on this shared mock.
+    mockView.getCFI.mockReset();
+    mockView.getCFI.mockReturnValue('cfi-prev-paragraph');
+
+    const timeListeners = controllerListeners['tts-audiobook-time'] || [];
+    const speakListeners = controllerListeners['tts-speak-mark'] || [];
+    const highlightListeners = controllerListeners['tts-highlight-mark'] || [];
+
+    await act(async () => {
+      for (const handler of timeListeners) {
+        handler(
+          new CustomEvent('tts-audiobook-time', {
+            detail: { currentTime: 100, duration: 300, chapterTitle: 'Chapter', narratorName: 'N' },
+          }),
+        );
+      }
+      for (const handler of speakListeners) {
+        handler(
+          new CustomEvent('tts-speak-mark', {
+            detail: { name: '1', text: 'Second paragraph currently being narrated.' },
+          }),
+        );
+      }
+      for (const handler of highlightListeners) {
+        handler(new CustomEvent('tts-highlight-mark', { detail: { cfi: 'cfi-current' } }));
+      }
+
+      await latestTTSControl?.handleHighlightRecentAudiobook(10);
+    });
+
+    expect(mockView.addAnnotation).toHaveBeenCalledTimes(1);
+    expect(mockUpdateBooknotes).toHaveBeenCalledWith(
+      'book-1',
+      expect.arrayContaining([
+        expect.objectContaining({
+          cfi: 'cfi-prev-paragraph',
+          text: 'First paragraph read moments ago.',
+          color: 'yellow',
+        }),
+      ]),
+    );
+    expect(mockSaveConfig).toHaveBeenCalled();
+  });
+
+  it('falls back to recent sentence marks when no paragraph can be resolved', async () => {
     render(<Harness />);
     await act(async () => {
       await startAndAwait();
@@ -551,7 +618,7 @@ describe('useTTSControl tts-audiobook-seek cross-chapter behavior', () => {
     for (let i = 0; i < 10; i++) await Promise.resolve();
   };
 
-  it('prepares the tapped section and cues the audiobook without autoplay on cross-chapter long-press', async () => {
+  it('cues the tapped section and auto-resumes on cross-chapter long-press while playing', async () => {
     render(<Harness />);
     await act(async () => {
       await startAndAwait();
@@ -580,10 +647,11 @@ describe('useTTSControl tts-audiobook-seek cross-chapter behavior', () => {
     expect(controller.prepareSection).toHaveBeenCalledWith(2);
     expect(mockAudiobookClient.cueToText).toHaveBeenCalledWith('the cathedral stood silent');
     expect(controller.navigateToChapter).not.toHaveBeenCalled();
-    expect(controller.start).not.toHaveBeenCalled();
+    // The user was listening — the narrator follows the finger and keeps going.
+    expect(controller.start).toHaveBeenCalledTimes(1);
   });
 
-  it('cues the current chapter without restarting playback on same-chapter long-press', async () => {
+  it('cues and auto-resumes on same-chapter long-press while playing', async () => {
     render(<Harness />);
     await act(async () => {
       await startAndAwait();
@@ -612,10 +680,10 @@ describe('useTTSControl tts-audiobook-seek cross-chapter behavior', () => {
     expect(controller.prepareSection).toHaveBeenCalledWith(2);
     expect(controller.navigateToChapter).not.toHaveBeenCalled();
     expect(mockAudiobookClient.cueToText).toHaveBeenCalledWith('the cathedral stood silent');
-    expect(controller.start).not.toHaveBeenCalled();
+    expect(controller.start).toHaveBeenCalledTimes(1);
   });
 
-  it('never auto-restarts playback after a same-chapter cue', async () => {
+  it('does not auto-resume when the cue fails to find a target', async () => {
     render(<Harness />);
     await act(async () => {
       await startAndAwait();
@@ -636,6 +704,7 @@ describe('useTTSControl tts-audiobook-seek cross-chapter behavior', () => {
     controller.pause.mockClear();
     controller.prepareSection.mockClear();
     controller.start.mockClear();
+    mockAudiobookClient.cueToText.mockResolvedValueOnce(false);
 
     await act(async () => {
       await eventDispatcher.dispatch('tts-audiobook-seek', {
@@ -649,6 +718,7 @@ describe('useTTSControl tts-audiobook-seek cross-chapter behavior', () => {
     expect(controller.pause).toHaveBeenCalled();
     expect(controller.prepareSection).toHaveBeenCalledWith(2);
     expect(mockAudiobookClient.cueToText).toHaveBeenCalledWith('the cathedral stood silent');
+    // Nothing was cued — restarting would replay the old spot at random.
     expect(controller.start).not.toHaveBeenCalled();
   });
 

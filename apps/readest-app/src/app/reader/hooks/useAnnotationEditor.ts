@@ -140,7 +140,10 @@ export const useAnnotationEditor = ({
       }
 
       const newCfi = view.getCFI(targetIndex, newRange);
-      const newText = await getAnnotationText(newRange);
+      // The transformer pipeline behind getAnnotationText is far too slow to
+      // run on every pointermove; mid-drag the raw range text is enough for
+      // the live highlight. The full pipeline runs once, on release.
+      const newText = isDragging ? newRange.toString() : await getAnnotationText(newRange);
 
       if (newCfi && newText) {
         const config = getConfig(bookKey)!;

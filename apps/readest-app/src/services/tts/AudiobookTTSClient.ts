@@ -1308,13 +1308,32 @@ export class AudiobookTTSClient implements TTSClient {
 
   async cueToText(text: string, chapterIndex?: number): Promise<boolean> {
     if (!this.#manifest || !this.#audioEl) return false;
+    // The reader hook syncs controller.sectionIndex to the tapped section
+    // before cueing, so the source-mapped chapter — not the one currently
+    // playing — is where the user's finger is. Search it first; common
+    // phrases repeat across chapters and a fuzzy match in the playing
+    // chapter would otherwise win.
+    const sourceChapter = this.#selectSourceMatchedChapter(this.#getSourceMatchedChapters());
     const match = await this.#locateTextMatch(text, {
       preferredChapterIndex:
-        chapterIndex ?? (this.#currentChapterIndex > 0 ? this.#currentChapterIndex : undefined),
+        chapterIndex ??
+        sourceChapter?.index ??
+        (this.#currentChapterIndex > 0 ? this.#currentChapterIndex : undefined),
       sectionLabel: this.controller?.sectionLabel ?? '',
     });
 
     if (!match) {
+      // No text match anywhere, but the tapped section maps to a different
+      // chapter — land at that chapter's start rather than leaving the
+      // narrator stranded where it was.
+      const fallbackChapter = this.#findChapterByIndex(chapterIndex ?? -1) ?? sourceChapter;
+      if (fallbackChapter && fallbackChapter.index !== this.#currentChapterIndex) {
+        await this.#setActiveChapter(fallbackChapter);
+        this.#setAudioTime(0);
+        this.#audioEl.pause();
+        this.#dispatchCurrentTime(true);
+        return true;
+      }
       this.#dispatchCurrentTime(true);
       return false;
     }

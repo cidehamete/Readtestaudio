@@ -95,8 +95,8 @@ const TTSBar = ({
               <button
                 onClick={() => onHighlightRecent(10)}
                 className='bg-primary text-primary-content rounded-full p-2 transition-transform duration-200 hover:scale-105'
-                title={_('Highlight last 10 seconds')}
-                aria-label={_('Highlight last 10 seconds')}
+                title={_('Highlight previous paragraph')}
+                aria-label={_('Highlight previous paragraph')}
               >
                 <MdHighlight size={iconSize32} />
               </button>

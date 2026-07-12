@@ -18,7 +18,7 @@ interface HandleProps {
   isVertical: boolean;
   type: 'start' | 'end';
   color: string;
-  onDragStart: (pointerType: string) => void;
+  onDragStart: (pointerType: string, point: Point) => void;
   onDrag: (point: Point) => void;
   onDragEnd: () => void;
 }
@@ -37,13 +37,17 @@ const Handle: React.FC<HandleProps> = ({
   const size = useResponsiveSize(24);
   const circleRadius = useResponsiveSize(8);
   const stemHeight = useResponsiveSize(12);
+  // Invisible padding around the pin. The visible pin is ~24px wide — well
+  // under the ~44px a fingertip needs — so grabbing it reliably was hard.
+  // The padding enlarges the grab target without changing the visuals.
+  const hitPad = useResponsiveSize(12);
 
   const handlePointerDown = useCallback(
     (e: React.PointerEvent) => {
       e.preventDefault();
       e.stopPropagation();
       isDragging.current = true;
-      onDragStart(e.pointerType);
+      onDragStart(e.pointerType, { x: e.clientX, y: e.clientY });
       (e.target as HTMLElement).setPointerCapture(e.pointerId);
     },
     [onDragStart],
@@ -78,20 +82,23 @@ const Handle: React.FC<HandleProps> = ({
         hidden && 'hidden',
       )}
       style={{
-        left: isVertical
-          ? type === 'start'
-            ? position.x - size / 2 + stemHeight / 4
-            : position.x - size / 2
-          : position.x - size / 2,
-        top: isVertical
-          ? type === 'start'
-            ? position.y - size + stemHeight / 2
-            : position.y - size / 2 - stemHeight / 2
-          : type === 'start'
-            ? position.y - size
-            : position.y - size / 2 - stemHeight / 8,
-        width: size,
-        height: size + stemHeight,
+        left:
+          (isVertical
+            ? type === 'start'
+              ? position.x - size / 2 + stemHeight / 4
+              : position.x - size / 2
+            : position.x - size / 2) - hitPad,
+        top:
+          (isVertical
+            ? type === 'start'
+              ? position.y - size + stemHeight / 2
+              : position.y - size / 2 - stemHeight / 2
+            : type === 'start'
+              ? position.y - size
+              : position.y - size / 2 - stemHeight / 8) - hitPad,
+        width: size + hitPad * 2,
+        height: size + stemHeight + hitPad * 2,
+        padding: hitPad,
       }}
       onPointerDown={handlePointerDown}
       onPointerMove={handlePointerMove}
@@ -168,6 +175,13 @@ const AnnotationRangeEditor: React.FC<AnnotationRangeEditorProps> = ({
   const dragPointerTypeRef = useRef<string>('');
   const startRef = useRef<Point>({ x: 0, y: 0 });
   const endRef = useRef<Point>({ x: 0, y: 0 });
+  // Where on the pin the finger grabbed it, relative to the range anchor.
+  // Applying this delta during the drag keeps the selection glued to its
+  // anchor instead of jumping to wherever the fingertip happens to be
+  // (which is below the text line for the end pin, above it for the start).
+  const grabOffsetRef = useRef<Point>({ x: 0, y: 0 });
+  const dragRafRef = useRef<number | null>(null);
+  const pendingDragRef = useRef<{ handle: 'start' | 'end'; point: Point } | null>(null);
   const [draggingHandle, setDraggingHandle] = useState<'start' | 'end' | null>(null);
   const [currentStart, setCurrentStart] = useState<Point>({ x: 0, y: 0 });
   const [currentEnd, setCurrentEnd] = useState<Point>({ x: 0, y: 0 });
@@ -197,9 +211,13 @@ const AnnotationRangeEditor: React.FC<AnnotationRangeEditorProps> = ({
   }, [handlePositions]);
 
   const handleStartDragStart = useCallback(
-    (pointerType: string) => {
+    (pointerType: string, point: Point) => {
       draggingRef.current = 'start';
       dragPointerTypeRef.current = pointerType;
+      grabOffsetRef.current = {
+        x: startRef.current.x - point.x,
+        y: startRef.current.y - point.y,
+      };
       setDraggingHandle('start');
       setLoupePoint({ ...startRef.current });
       onStartEdit();
@@ -208,9 +226,13 @@ const AnnotationRangeEditor: React.FC<AnnotationRangeEditorProps> = ({
   );
 
   const handleEndDragStart = useCallback(
-    (pointerType: string) => {
+    (pointerType: string, point: Point) => {
       draggingRef.current = 'end';
       dragPointerTypeRef.current = pointerType;
+      grabOffsetRef.current = {
+        x: endRef.current.x - point.x,
+        y: endRef.current.y - point.y,
+      };
       setDraggingHandle('end');
       setLoupePoint({ ...endRef.current });
       onStartEdit();
@@ -218,32 +240,74 @@ const AnnotationRangeEditor: React.FC<AnnotationRangeEditorProps> = ({
     [onStartEdit],
   );
 
-  const handleStartDrag = useCallback(
-    (point: Point) => {
-      setCurrentStart(point);
-      setLoupePoint(point);
-      startRef.current = point;
-      handleAnnotationRangeChange(point, endRef.current, isVertical, true);
+  // Coalesce pointermove bursts (120Hz on recent iPhones) into one range
+  // recomputation per animation frame — caretPositionFromPoint + range
+  // rebuilds on every event is what made the pins feel laggy.
+  const scheduleDragUpdate = useCallback(
+    (handle: 'start' | 'end', rawPoint: Point) => {
+      const point = {
+        x: rawPoint.x + grabOffsetRef.current.x,
+        y: rawPoint.y + grabOffsetRef.current.y,
+      };
+      pendingDragRef.current = { handle, point };
+      if (dragRafRef.current !== null) return;
+      dragRafRef.current = requestAnimationFrame(() => {
+        dragRafRef.current = null;
+        const pending = pendingDragRef.current;
+        if (!pending || draggingRef.current !== pending.handle) return;
+        if (pending.handle === 'start') {
+          setCurrentStart(pending.point);
+          setLoupePoint(pending.point);
+          startRef.current = pending.point;
+          handleAnnotationRangeChange(pending.point, endRef.current, isVertical, true);
+        } else {
+          setCurrentEnd(pending.point);
+          setLoupePoint(pending.point);
+          endRef.current = pending.point;
+          handleAnnotationRangeChange(startRef.current, pending.point, isVertical, true);
+        }
+      });
     },
     [isVertical, handleAnnotationRangeChange],
+  );
+
+  const handleStartDrag = useCallback(
+    (point: Point) => scheduleDragUpdate('start', point),
+    [scheduleDragUpdate],
   );
 
   const handleEndDrag = useCallback(
-    (point: Point) => {
-      setCurrentEnd(point);
-      setLoupePoint(point);
-      endRef.current = point;
-      handleAnnotationRangeChange(startRef.current, point, isVertical, true);
-    },
-    [isVertical, handleAnnotationRangeChange],
+    (point: Point) => scheduleDragUpdate('end', point),
+    [scheduleDragUpdate],
   );
 
   const handleDragEnd = useCallback(() => {
+    if (dragRafRef.current !== null) {
+      cancelAnimationFrame(dragRafRef.current);
+      dragRafRef.current = null;
+    }
+    const pending = pendingDragRef.current;
+    if (pending && draggingRef.current === pending.handle) {
+      if (pending.handle === 'start') {
+        startRef.current = pending.point;
+      } else {
+        endRef.current = pending.point;
+      }
+    }
+    pendingDragRef.current = null;
     draggingRef.current = null;
     setDraggingHandle(null);
     setLoupePoint(null);
     handleAnnotationRangeChange(startRef.current, endRef.current, isVertical, false);
   }, [isVertical, handleAnnotationRangeChange]);
+
+  useEffect(() => {
+    return () => {
+      if (dragRafRef.current !== null) {
+        cancelAnimationFrame(dragRafRef.current);
+      }
+    };
+  }, []);
 
   if (currentStart.x === 0 && currentStart.y === 0) {
     return null;

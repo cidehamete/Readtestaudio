@@ -628,8 +628,10 @@ export const useTTSControl = ({ bookKey, onRequestHidePanel }: UseTTSControlProp
   );
 
   // handleTTSAudiobookSeek — relocate the audiobook narrator to a tapped
-  // text position, but leave playback paused there. The next Play tap is the
-  // user gesture that resumes audio from the newly-cued spot.
+  // text position. If the user was listening when the long-press arrived,
+  // playback resumes from the cued spot so the narrator follows the finger.
+  // If they were paused, the narrator stays paused at the new spot — the
+  // next Play tap is the user gesture iOS autoplay rules require.
   const handleTTSAudiobookSeek = async (event: CustomEvent) => {
     const {
       bookKey: ttsBookKey,
@@ -649,6 +651,7 @@ export const useTTSControl = ({ bookKey, onRequestHidePanel }: UseTTSControlProp
     if (!existingController?.ttsAudiobookClient?.initialized || !seekText) return;
     const targetSectionIndex =
       typeof sectionIndex === 'number' ? sectionIndex : existingController.sectionIndex;
+    const wasPlaying = existingController.state === 'playing';
 
     try {
       await existingController.pause();
@@ -657,7 +660,22 @@ export const useTTSControl = ({ bookKey, onRequestHidePanel }: UseTTSControlProp
 
       await syncAudiobookCursorToSelection(targetSectionIndex, range, cfi);
 
-      await existingController.ttsAudiobookClient.cueToText(seekText);
+      const cued = await existingController.ttsAudiobookClient.cueToText(seekText);
+
+      if (cued && wasPlaying && !isTogglingPlaybackRef.current) {
+        // The audio element was playing moments ago, so it's already unlocked
+        // by the user's original Play gesture and resuming programmatically is
+        // allowed. start() re-enters the speak loop from the view's new cursor
+        // — the same path a manual Play tap takes after a cue.
+        isTogglingPlaybackRef.current = true;
+        try {
+          setIsPlaying(true);
+          setIsPaused(false);
+          await existingController.start();
+        } finally {
+          isTogglingPlaybackRef.current = false;
+        }
+      }
     } catch (e) {
       console.warn('[TTS] audiobook word-seek cue failed:', e);
     }
@@ -1047,6 +1065,11 @@ export const useTTSControl = ({ bookKey, onRequestHidePanel }: UseTTSControlProp
     return () => document.removeEventListener('visibilitychange', handleVisibilityChange);
   }, [handleJumpToNarrator, isAudiobookBatterySaverEnabled]);
 
+  // The "flashlight" button. The user (listening at 2x, often mid-run) taps
+  // it after a passage catches their ear — by the time the tap lands the
+  // narrator is usually into the NEXT paragraph. So the primary strategy
+  // highlights the paragraph BEFORE the one being narrated; the trailing-
+  // sentences window is only the fallback when no paragraph can be resolved.
   const handleHighlightRecentAudiobook = useCallback(
     async (seconds = 10) => {
       const ttsController = ttsControllerRef.current;
@@ -1057,8 +1080,107 @@ export const useTTSControl = ({ bookKey, onRequestHidePanel }: UseTTSControlProp
       const progress = getProgress(bookKey);
       if (!config || !view) return;
 
+      const style = settings.globalReadSettings.highlightStyle;
+      const color = settings.globalReadSettings.highlightStyles[style];
+      const existingBooknotes = [...(config.booknotes ?? [])];
+      const createdAt = Date.now();
+      const marks = recentAudiobookMarksRef.current;
+      const latestMark = marks[marks.length - 1];
+
+      const isAlreadyHighlighted = (cfi: string) =>
+        existingBooknotes.some(
+          (note) => note.cfi === cfi && note.type === 'annotation' && note.style && !note.deletedAt,
+        );
+
+      const saveAnnotations = async (annotations: BookNote[], successMessage: string) => {
+        const views = getViewsById(bookKey.split('-')[0]!);
+        annotations.forEach((annotation) =>
+          views.forEach((view) => view?.addAnnotation(annotation)),
+        );
+        const updatedConfig = updateBooknotes(bookKey, [...existingBooknotes, ...annotations]);
+        if (updatedConfig) {
+          await saveConfig(envConfig, bookKey, updatedConfig, settings);
+        }
+        eventDispatcher.dispatch('toast', {
+          message: successMessage,
+          type: 'success',
+          timeout: 2500,
+        });
+      };
+
+      // Primary strategy: resolve the narrator's position and highlight the
+      // previous paragraph block. Returns 'duplicate' when that paragraph is
+      // already highlighted, null when it cannot be resolved (fall back).
+      const buildPreviousParagraphAnnotation = (): BookNote | 'duplicate' | null => {
+        if (!latestMark?.cfi) return null;
+        try {
+          const { index, anchor } = view.resolveCFI(latestMark.cfi);
+          const contents = view.renderer.getContents();
+          const doc = (contents.find((content) => content.index === index) ?? contents[0])?.doc;
+          if (!doc || typeof anchor !== 'function') return null;
+          const anchored = anchor(doc) as Range | null;
+          const node = anchored?.startContainer;
+          const element =
+            node?.nodeType === Node.TEXT_NODE
+              ? (node.parentElement as Element | null)
+              : ((node as Element | null) ?? null);
+          const blockSelector = 'p, li, blockquote, h1, h2, h3, h4, h5, h6, dd, dt';
+          const currentBlock = element?.closest?.(blockSelector) ?? null;
+          if (!currentBlock) return null;
+
+          let target: Element | null = currentBlock.previousElementSibling;
+          while (target && (!target.matches(blockSelector) || !target.textContent?.trim())) {
+            target = target.previousElementSibling;
+          }
+          // At the top of a section there is no previous paragraph — take the
+          // one being narrated rather than doing nothing.
+          if (!target) target = currentBlock;
+
+          const text = (target.textContent ?? '').replace(/\s+/g, ' ').trim();
+          if (!text) return null;
+          const range = doc.createRange();
+          range.selectNodeContents(target);
+          const cfi = view.getCFI(
+            typeof index === 'number' && index >= 0 ? index : (progress?.index ?? 0),
+            range,
+          );
+          if (!cfi) return null;
+          if (isAlreadyHighlighted(cfi)) return 'duplicate';
+          return {
+            id: uniqueId(),
+            type: 'annotation',
+            cfi,
+            style,
+            color,
+            text,
+            note: '',
+            page: latestMark.page ?? progress?.page,
+            createdAt,
+            updatedAt: createdAt,
+          };
+        } catch (e) {
+          console.warn('[TTS] previous-paragraph highlight failed; using fallback:', e);
+          return null;
+        }
+      };
+
+      const paragraphAnnotation = buildPreviousParagraphAnnotation();
+      if (paragraphAnnotation === 'duplicate') {
+        eventDispatcher.dispatch('toast', {
+          message: _('Already highlighted'),
+          type: 'info',
+          timeout: 2000,
+        });
+        return;
+      }
+      if (paragraphAnnotation) {
+        await saveAnnotations([paragraphAnnotation], _('Highlighted previous paragraph'));
+        return;
+      }
+
+      // Fallback: highlight the sentences heard in the trailing window.
       const now = audiobookTimeRef.current;
-      const recentMarks = recentAudiobookMarksRef.current
+      const recentMarks = marks
         .filter((entry) => now - entry.time <= seconds)
         .filter(
           (entry, index, entries) =>
@@ -1074,21 +1196,8 @@ export const useTTSControl = ({ bookKey, onRequestHidePanel }: UseTTSControlProp
         return;
       }
 
-      const style = settings.globalReadSettings.highlightStyle;
-      const color = settings.globalReadSettings.highlightStyles[style];
-      const existingBooknotes = [...(config.booknotes ?? [])];
-      const createdAt = Date.now();
       const annotations: BookNote[] = recentMarks
-        .filter(
-          (entry) =>
-            !existingBooknotes.some(
-              (note) =>
-                note.cfi === entry.cfi &&
-                note.type === 'annotation' &&
-                note.style &&
-                !note.deletedAt,
-            ),
-        )
+        .filter((entry) => !isAlreadyHighlighted(entry.cfi))
         .map((entry) => ({
           id: uniqueId(),
           type: 'annotation',
@@ -1111,21 +1220,12 @@ export const useTTSControl = ({ bookKey, onRequestHidePanel }: UseTTSControlProp
         return;
       }
 
-      const views = getViewsById(bookKey.split('-')[0]!);
-      annotations.forEach((annotation) => views.forEach((view) => view?.addAnnotation(annotation)));
-      const updatedConfig = updateBooknotes(bookKey, [...existingBooknotes, ...annotations]);
-      if (updatedConfig) {
-        await saveConfig(envConfig, bookKey, updatedConfig, settings);
-      }
-
-      eventDispatcher.dispatch('toast', {
-        message:
-          annotations.length === 1
-            ? _('Highlighted recent sentence')
-            : _('Highlighted recent sentences'),
-        type: 'success',
-        timeout: 2500,
-      });
+      await saveAnnotations(
+        annotations,
+        annotations.length === 1
+          ? _('Highlighted recent sentence')
+          : _('Highlighted recent sentences'),
+      );
     },
     [
       _,

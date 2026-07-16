@@ -11,6 +11,8 @@ import {
   MdSearch,
   MdHighlight,
 } from 'react-icons/md';
+import { IoIosList } from 'react-icons/io';
+import { PiNotePencil } from 'react-icons/pi';
 import { Insets } from '@/types/misc';
 import { useEnv } from '@/context/EnvContext';
 import { useReaderStore } from '@/store/readerStore';
@@ -28,6 +30,8 @@ type TTSBarProps = {
   onSkipForward?: (seconds: number) => void;
   onHighlightRecent?: (seconds: number) => void;
   onSearch?: () => void;
+  onShowTOC?: () => void;
+  onShowHighlights?: () => void;
   gridInsets: Insets;
 };
 
@@ -42,6 +46,8 @@ const TTSBar = ({
   onSkipForward,
   onHighlightRecent,
   onSearch,
+  onShowTOC,
+  onShowHighlights,
   gridInsets,
 }: TTSBarProps) => {
   const _ = useTranslation();
@@ -109,6 +115,26 @@ const TTSBar = ({
                 aria-label={_('Search')}
               >
                 <MdSearch size={iconSize32} />
+              </button>
+            )}
+            {onShowTOC && (
+              <button
+                onClick={onShowTOC}
+                className='rounded-full p-1 transition-transform duration-200 hover:scale-105'
+                title={_('Table of Contents')}
+                aria-label={_('Table of Contents')}
+              >
+                <IoIosList size={iconSize32} />
+              </button>
+            )}
+            {onShowHighlights && (
+              <button
+                onClick={onShowHighlights}
+                className='rounded-full p-1 transition-transform duration-200 hover:scale-105'
+                title={_('Highlights')}
+                aria-label={_('Highlights')}
+              >
+                <PiNotePencil size={iconSize32} />
               </button>
             )}
           </>

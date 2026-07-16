@@ -20,6 +20,7 @@ import BookCard from './BookCard';
 import useSidebar from '../../hooks/useSidebar';
 import SearchBar from './SearchBar';
 import SearchResults from './SearchResults';
+import TabNavigation from './TabNavigation';
 
 const MIN_SIDEBAR_WIDTH = 0.05;
 const MAX_SIDEBAR_WIDTH = 0.45;
@@ -33,7 +34,7 @@ const SideBar = ({}) => {
     useSidebarStore();
   const searchNavState = sideBarBookKey ? getSearchNavState(sideBarBookKey) : null;
   const { searchTerm = '', searchResults = null } = searchNavState || {};
-  const { getBookData } = useBookDataStore();
+  const { getBookData, getConfig, setConfig } = useBookDataStore();
   const { getView, getViewSettings } = useReaderStore();
   const [isSearchBarVisible, setIsSearchBarVisible] = useState(false);
   const searchTermRef = useRef(searchTerm);
@@ -60,6 +61,27 @@ const SideBar = ({}) => {
     if (term !== undefined && term !== null) {
       setSearchTerm(bookKey, term);
     }
+  };
+
+  // Persist the requested tab so SidebarContent lands on it when it mounts.
+  const selectSidebarTab = (bookKey: string, tab: string) => {
+    const config = getConfig(bookKey);
+    if (config?.viewSettings) {
+      config.viewSettings.sideBarTab = tab;
+      setConfig(bookKey, config);
+    }
+  };
+
+  // Open the sidebar directly on the TOC/annotations/bookmarks view, leaving
+  // any search-results view behind. Fired by the TTS bar's TOC and Highlights
+  // buttons; SidebarContent also listens so an already-open sidebar switches
+  // tabs in place.
+  const onShowSidebarTabEvent = async (event: CustomEvent) => {
+    const { bookKey, tab } = event.detail as { bookKey: string; tab?: string };
+    setSideBarBookKey(bookKey);
+    setSideBarVisible(true);
+    setIsSearchBarVisible(false);
+    if (tab) selectSidebarTab(bookKey, tab);
   };
 
   const onNavigateEvent = async () => {
@@ -98,9 +120,11 @@ const SideBar = ({}) => {
   useEffect(() => {
     eventDispatcher.on('search-term', onSearchEvent);
     eventDispatcher.on('navigate', onNavigateEvent);
+    eventDispatcher.on('show-sidebar-tab', onShowSidebarTabEvent);
     return () => {
       eventDispatcher.off('search-term', onSearchEvent);
       eventDispatcher.off('navigate', onNavigateEvent);
+      eventDispatcher.off('show-sidebar-tab', onShowSidebarTabEvent);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -266,11 +290,27 @@ const SideBar = ({}) => {
           </div>
         </div>
         {isSearchBarVisible && searchResults ? (
-          <SearchResults
-            bookKey={sideBarBookKey!}
-            results={searchResults}
-            onSelectResult={handleSearchResultClick}
-          />
+          <>
+            <SearchResults
+              bookKey={sideBarBookKey!}
+              results={searchResults}
+              onSelectResult={handleSearchResultClick}
+            />
+            {/* Keep the TOC/annotations/bookmarks tabs reachable while search
+                results are showing — tapping one exits the search view. */}
+            <div
+              className='flex-shrink-0'
+              style={{ paddingBottom: 'calc(env(safe-area-inset-bottom, 0px) / 2)' }}
+            >
+              <TabNavigation
+                activeTab=''
+                onTabChange={(tab) => {
+                  selectSidebarTab(sideBarBookKey!, tab);
+                  handleHideSearchBar();
+                }}
+              />
+            </div>
+          </>
         ) : (
           <SidebarContent bookDoc={bookDoc} sideBarBookKey={sideBarBookKey!} />
         )}

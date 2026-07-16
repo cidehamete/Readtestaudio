@@ -145,6 +145,12 @@ const TTSControl: React.FC<TTSControlProps> = ({ bookKey, gridInsets }) => {
     eventDispatcher.dispatch('search-term', { term: null, bookKey });
   };
 
+  // Open the sidebar directly on a tab (toc/annotations), leaving any
+  // search-results view behind. Handled by SideBar + SidebarContent.
+  const handleShowSidebarTab = (tab: string) => {
+    eventDispatcher.dispatch('show-sidebar-tab', { bookKey, tab });
+  };
+
   return (
     <>
       {shouldMountBackButton && (
@@ -249,6 +255,8 @@ const TTSControl: React.FC<TTSControlProps> = ({ bookKey, gridInsets }) => {
           onSkipForward={tts.handleSkipForward}
           onHighlightRecent={tts.handleHighlightRecentAudiobook}
           onSearch={handleShowSearch}
+          onShowTOC={() => handleShowSidebarTab('toc')}
+          onShowHighlights={() => handleShowSidebarTab('annotations')}
           gridInsets={gridInsets}
         />
       )}

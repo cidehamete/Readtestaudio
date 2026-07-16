@@ -6,6 +6,7 @@ import { useReaderStore } from '@/store/readerStore';
 import { useSidebarStore } from '@/store/sidebarStore';
 import { useBookDataStore } from '@/store/bookDataStore';
 import { useSettingsStore } from '@/store/settingsStore';
+import { eventDispatcher } from '@/utils/event';
 import { OverlayScrollbarsComponent } from 'overlayscrollbars-react';
 import 'overlayscrollbars/overlayscrollbars.css';
 
@@ -43,6 +44,21 @@ const SidebarContent: React.FC<{
       setTargetTab('toc');
     }
   }, [aiEnabled, activeTab, targetTab]);
+
+  // A 'show-sidebar-tab' event (TTS bar TOC/Highlights buttons) can arrive
+  // while the tabs view is already mounted — switch tabs in place. Same-tab
+  // events are ignored so they don't trigger handleTabChange's mobile
+  // "tap active tab to close" behavior.
+  useEffect(() => {
+    const onShowSidebarTab = (event: CustomEvent) => {
+      const { bookKey, tab } = event.detail as { bookKey: string; tab?: string };
+      if (bookKey !== sideBarBookKey || !tab || tab === activeTab) return;
+      handleTabChange(tab);
+    };
+    eventDispatcher.on('show-sidebar-tab', onShowSidebarTab);
+    return () => eventDispatcher.off('show-sidebar-tab', onShowSidebarTab);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sideBarBookKey, activeTab]);
 
   const handleTabChange = (tab: string) => {
     if (activeTab === tab) {

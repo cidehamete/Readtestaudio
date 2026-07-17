@@ -13,6 +13,12 @@ const exportOutput = appPlatform !== 'web' && !isDev;
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {
+  // Bake the deployed commit into the client bundle so the About dialog can
+  // show WHICH build is running (Vercel provides VERCEL_GIT_COMMIT_SHA at
+  // build time; empty string for local dev builds).
+  env: {
+    NEXT_PUBLIC_BUILD_SHA: (process.env['VERCEL_GIT_COMMIT_SHA'] ?? '').slice(0, 7),
+  },
   // Ensure Next.js uses SSG instead of SSR
   // https://nextjs.org/docs/pages/building-your-application/deploying/static-exports
   output: exportOutput ? 'export' : undefined,

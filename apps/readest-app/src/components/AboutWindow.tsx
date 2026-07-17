@@ -4,7 +4,7 @@ import { useEnv } from '@/context/EnvContext';
 import { useTranslation } from '@/hooks/useTranslation';
 import { checkForAppUpdates, checkAppReleaseNotes } from '@/helpers/updater';
 import { parseWebViewInfo } from '@/utils/ua';
-import { getAppVersion } from '@/utils/version';
+import { getAppVersion, getBuildSha } from '@/utils/version';
 import SupportLinks from './SupportLinks';
 import LegalLinks from './LegalLinks';
 import Dialog from './Dialog';
@@ -97,6 +97,11 @@ export const AboutWindow = () => {
               <p className='text-neutral-content text-center text-sm'>
                 {_('Version {{version}}', { version: getAppVersion() })} {`(${browserInfo})`}
               </p>
+              {getBuildSha() && (
+                <p className='text-neutral-content text-center text-xs'>
+                  {_('Build {{sha}}', { sha: getBuildSha() })}
+                </p>
+              )}
             </div>
             <div className='my-1 h-5'>
               {!updateStatus && (

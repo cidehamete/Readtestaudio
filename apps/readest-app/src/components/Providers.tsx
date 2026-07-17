@@ -16,6 +16,7 @@ import { useBackgroundTexture } from '@/hooks/useBackgroundTexture';
 import { useEinkMode } from '@/hooks/useEinkMode';
 import { getLocale } from '@/utils/misc';
 import { getDirFromUILanguage } from '@/utils/rtl';
+import { checkForAppUpdate } from '@/utils/appUpdate';
 import { DropdownProvider } from '@/context/DropdownContext';
 import { CommandPaletteProvider, CommandPalette } from '@/components/command-palette';
 import AtmosphereOverlay from '@/components/AtmosphereOverlay';
@@ -46,6 +47,18 @@ const Providers = ({ children }: { children: React.ReactNode }) => {
     return () => {
       i18n.off('languageChanged', handlerLanguageChanged);
     };
+  }, []);
+
+  // Nudge the service worker to look for a new build on launch and every
+  // time the app returns to the foreground. iOS home-screen apps check for
+  // SW updates so rarely on their own that deploys never seemed to arrive.
+  useEffect(() => {
+    checkForAppUpdate();
+    const onVisibilityChange = () => {
+      if (!document.hidden) checkForAppUpdate();
+    };
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    return () => document.removeEventListener('visibilitychange', onVisibilityChange);
   }, []);
 
   useEffect(() => {

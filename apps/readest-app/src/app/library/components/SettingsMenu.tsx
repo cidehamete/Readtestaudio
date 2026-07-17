@@ -23,6 +23,8 @@ import { navigateToLogin, navigateToProfile } from '@/utils/nav';
 import { tauriHandleSetAlwaysOnTop, tauriHandleToggleFullScreen } from '@/utils/window';
 import { optInTelemetry, optOutTelemetry } from '@/utils/telemetry';
 import { setAboutDialogVisible } from '@/components/AboutWindow';
+import { forceAppRefresh } from '@/utils/appUpdate';
+import { getBuildSha } from '@/utils/version';
 import { setMigrateDataDirDialogVisible } from '@/app/library/components/MigrateDataWindow';
 import { requestStoragePermission } from '@/utils/permission';
 import { saveSysSettings } from '@/helpers/settings';
@@ -105,6 +107,13 @@ const SettingsMenu: React.FC<SettingsMenuProps> = ({ onPullLibrary, setIsDropdow
   const handleReloadPage = () => {
     window.location.reload();
     setIsDropdownOpen?.(false);
+  };
+
+  // Full refresh for the installed web app: drops the service worker and its
+  // caches so the latest deploy loads. Library data (IndexedDB) is untouched.
+  const handleUpdateApp = () => {
+    setIsDropdownOpen?.(false);
+    forceAppRefresh();
   };
 
   const handleFullScreen = () => {
@@ -406,6 +415,13 @@ const SettingsMenu: React.FC<SettingsMenuProps> = ({ onPullLibrary, setIsDropdow
         />
       )}
       <MenuItem label={_('Reload Page')} onClick={handleReloadPage} />
+      {isWebAppPlatform() && (
+        <MenuItem
+          label={_('Update App')}
+          description={getBuildSha() ? _('Build {{sha}}', { sha: getBuildSha() }) : ''}
+          onClick={handleUpdateApp}
+        />
+      )}
       <MenuItem
         label={themeModeLabel}
         Icon={themeMode === 'dark' ? PiMoon : themeMode === 'light' ? PiSun : TbSunMoon}
